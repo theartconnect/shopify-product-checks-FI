@@ -37,9 +37,9 @@ jobs:
         shell: bash
         run: |
           # Defaults if repo variables are not set
-          RUN_EVERY_MINUTES="${RUN_EVERY_MINUTES:-30}"
-          QUIET_START_IST="${QUIET_START_IST:-22}"
-          QUIET_END_IST="${QUIET_END_IST:-7}"
+          RUN_EVERY_MINUTES="${RUN_EVERY_MINUTES:-10}"
+          QUIET_START_IST="${QUIET_START_IST:-8}"
+          QUIET_END_IST="${QUIET_END_IST:-23}"
 
           echo "RUN_EVERY_MINUTES=$RUN_EVERY_MINUTES"
           echo "QUIET_START_IST=$QUIET_START_IST"
