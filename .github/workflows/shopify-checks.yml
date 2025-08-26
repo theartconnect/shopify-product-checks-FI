@@ -1,0 +1,102 @@
+name: Shopify Product Checks
+
+on:
+  schedule:
+    # GitHub only supports 5-min granularity; we'll gate inside the job.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Optional knobs via Repository Variables; if not set, we fallback in the gate step.
+  SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
+  DRY_RUN: ${{ vars.DRY_RUN }}
+  SHOPIFY_LOG_GRAPHQL_COSTS: ${{ vars.SHOPIFY_LOG_GRAPHQL_COSTS }}
+  RUN_EVERY_MINUTES: ${{ vars.RUN_EVERY_MINUTES }}
+  QUIET_START_IST: ${{ vars.QUIET_START_IST }}
+  QUIET_END_IST: ${{ vars.QUIET_END_IST }}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Frequency & quiet-hours gate (IST)
+        id: gate
+        shell: bash
+        run: |
+          # Defaults if repo variables are not set
+          RUN_EVERY_MINUTES="${RUN_EVERY_MINUTES:-30}"
+          QUIET_START_IST="${QUIET_START_IST:-22}"
+          QUIET_END_IST="${QUIET_END_IST:-7}"
+
+          echo "RUN_EVERY_MINUTES=$RUN_EVERY_MINUTES"
+          echo "QUIET_START_IST=$QUIET_START_IST"
+          echo "QUIET_END_IST=$QUIET_END_IST"
+
+          # Frequency gate: only run when (epochMinutes % RUN_EVERY_MINUTES == 0)
+          EPOCH_MIN=$(( $(date -u +%s) / 60 ))
+          if [ $(( EPOCH_MIN % RUN_EVERY_MINUTES )) -ne 0 ]; then
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "Skip due to frequency gate."
+            exit 0
+          fi
+
+          # Quiet-hours (Asia/Kolkata)
+          IST_HOUR=$(TZ=Asia/Kolkata date +%H)
+          echo "Current IST hour=$IST_HOUR"
+
+          QUIET=0
+          # same-day window [START, END)
+          if [ "$QUIET_START_IST" -le "$QUIET_END_IST" ]; then
+            if [ "$IST_HOUR" -ge "$QUIET_START_IST" ] && [ "$IST_HOUR" -lt "$QUIET_END_IST" ]; then
+              QUIET=1
+            fi
+          else
+            # overnight window (e.g., 22 -> 07)
+            if [ "$IST_HOUR" -ge "$QUIET_START_IST" ] || [ "$IST_HOUR" -lt "$QUIET_END_IST" ]; then
+              QUIET=1
+            fi
+          fi
+
+          if [ "$QUIET" -eq 1 ]; then
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "Skip due to quiet hours."
+            exit 0
+          fi
+
+          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "Gates passed; will run."
+
+      - name: Create runtime .env from GitHub Secrets/Variables
+        if: steps.gate.outputs.should_run == 'true'
+        run: |
+          cat > .env <<'EOF'
+          SHOPIFY_STORE_DOMAIN=${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_ACCESS_TOKEN=${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          SHOPIFY_API_VERSION=${{ env.SHOPIFY_API_VERSION }}
+          SLACK_BOT_TOKEN=${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID=${{ secrets.SLACK_CHANNEL_ID }}
+          DRY_RUN=${{ env.DRY_RUN }}
+          SHOPIFY_LOG_GRAPHQL_COSTS=${{ env.SHOPIFY_LOG_GRAPHQL_COSTS }}
+          EOF
+          echo "Wrote .env"
+
+      - name: Install deps
+        if: steps.gate.outputs.should_run == 'true'
+        run: npm ci
+
+      - name: Run script
+        if: steps.gate.outputs.should_run == 'true'
+        run: node index.js
