@@ -51,8 +51,8 @@ jobs:
         run: |
           EVENT="${{ github.event_name }}"
           RUN_EVERY_MINUTES="${RUN_EVERY_MINUTES:-10}"
-          QUIET_START_IST="${QUIET_START_IST:-8}"
-          QUIET_END_IST="${QUIET_END_IST:-23}"
+          QUIET_START_IST="${QUIET_START_IST:-0}"
+          QUIET_END_IST="${QUIET_END_IST:-8}"
 
           echo "RUN_EVERY_MINUTES=$RUN_EVERY_MINUTES"
           echo "QUIET_START_IST=$QUIET_START_IST"
