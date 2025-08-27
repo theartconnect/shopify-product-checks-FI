@@ -2,8 +2,14 @@ name: Shopify Product Checks (cron + run window + frequency)
 
 on:
   schedule:
-    # Base tick: every 5 minutes (UTC). The gate below enforces your FREQUENCY_MINUTES.
+    # Base tick: every 5 minutes (UTC). The gate below enforces FREQUENCY_MINUTES.
     - cron: "*/5 * * * *"
+  # TEMP: allow manual run to prove everything is wired correctly
+  workflow_dispatch: {}
+  # TEMP: run immediately when this workflow file changes
+  push:
+    paths:
+      - ".github/workflows/shopify-checks.yml"
 
 permissions:
   contents: read
@@ -49,7 +55,6 @@ jobs:
           V_FREQUENCY_MINUTES: ${{ vars.FREQUENCY_MINUTES }}
           V_SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
 
-          # India Catalog (optional, your code can fallback to title "India")
           V_INDIA_CATALOG_ID: ${{ vars.INDIA_CATALOG_ID }}
           V_INDIA_CATALOG_GID: ${{ vars.INDIA_CATALOG_GID }}
           V_INDIA_CATALOG: ${{ vars.INDIA_CATALOG }}
@@ -61,7 +66,7 @@ jobs:
           [ -n "$S_SLACK_BOT_TOKEN" ] || { echo "❌ Missing secret: SLACK_BOT_TOKEN"; err=1; }
           [ -n "$S_SLACK_CHANNEL_ID" ] || { echo "❌ Missing secret: SLACK_CHANNEL_ID"; err=1; }
 
-          # Required Variables (run window + frequency + API version)
+          # Required Variables
           is_int_0_23 () { case "$1" in (""|*[!0-9]* ) return 1;; (*) [ "$1" -ge 0 ] && [ "$1" -le 23 ];; esac; }
           is_pos_int () { case "$1" in (""|*[!0-9]*|0) return 1;; (*) return 0;; esac; }
 
@@ -70,19 +75,19 @@ jobs:
           is_pos_int "$V_FREQUENCY_MINUTES" || { echo "❌ FREQUENCY_MINUTES must be a positive integer (Variables)"; err=1; }
           [ -n "$V_SHOPIFY_API_VERSION" ] || { echo "❌ SHOPIFY_API_VERSION must be set in Variables (e.g., 2025-07)"; err=1; }
 
-          # Optional: India catalog id(s). If none are set, index.js will try to find title 'India'.
+          # Optional: India catalog id(s). If none set, code will search by title 'India'.
           if [ -z "$V_INDIA_CATALOG_ID$V_INDIA_CATALOG_GID$V_INDIA_CATALOG" ]; then
             echo "ℹ️ No INDIA_CATALOG_* variable set; code will search by title 'India'."
           fi
 
-          # Helpful note: with cron */5, best to make FREQUENCY_MINUTES a multiple of 5.
+          # Helpful note: cron is */5, so ideally FREQUENCY_MINUTES is a multiple of 5
           if [ $(( V_FREQUENCY_MINUTES % 5 )) -ne 0 ]; then
-            echo "⚠️ FREQUENCY_MINUTES is not a multiple of 5; cron schedule is */5 so some ticks may be skipped."
+            echo "⚠️ FREQUENCY_MINUTES is not a multiple of 5; cron is */5 so some ticks may be skipped."
           fi
 
           exit $err
 
-      # ===== GATE: Running window (IST) + frequency =====
+      # ===== GATE: Running Time Start/End (IST) + frequency =====
       - name: Running window & frequency gate (IST)
         id: gate
         env:
