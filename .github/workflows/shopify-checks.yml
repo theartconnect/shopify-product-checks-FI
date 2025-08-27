@@ -2,19 +2,15 @@ name: Shopify Product Checks (cron + run window + frequency)
 
 on:
   schedule:
-    # Base tick: every 5 minutes (UTC). The gate below enforces FREQUENCY_MINUTES.
-    - cron: "*/5 * * * *"
-  # TEMP: allow manual run to prove everything is wired correctly
-  workflow_dispatch: {}
-  # TEMP: run immediately when this workflow file changes
+    - cron: "*/5 * * * *"   # base tick (UTC)
+  workflow_dispatch: {}      # manual run for testing
   push:
     paths:
-      - ".github/workflows/shopify-checks.yml"
+      - ".github/workflows/shopify-checks.yml"  # run when this file changes
 
 permissions:
   contents: read
 
-# Prevent overlapping runs
 concurrency:
   group: shopify-product-checks
   cancel-in-progress: true
@@ -35,14 +31,14 @@ jobs:
 
       - name: Check out repo
         uses: actions/checkout@v4
-        
+
       - name: Use Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: "npm"
 
-      # ===== HARD VALIDATION (no defaults) =====
+      # ===== HARD VALIDATION (no hidden defaults) =====
       - name: Validate required Secrets/Variables
         env:
           S_SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
@@ -60,6 +56,7 @@ jobs:
           V_INDIA_CATALOG: ${{ vars.INDIA_CATALOG }}
         run: |
           err=0
+
           # Required Secrets
           [ -n "$S_SHOPIFY_STORE_DOMAIN" ] || { echo "❌ Missing secret: SHOPIFY_STORE_DOMAIN"; err=1; }
           [ -n "$S_SHOPIFY_ADMIN_ACCESS_TOKEN" ] || { echo "❌ Missing secret: SHOPIFY_ADMIN_ACCESS_TOKEN"; err=1; }
@@ -75,20 +72,15 @@ jobs:
           is_pos_int "$V_FREQUENCY_MINUTES" || { echo "❌ FREQUENCY_MINUTES must be a positive integer (Variables)"; err=1; }
           [ -n "$V_SHOPIFY_API_VERSION" ] || { echo "❌ SHOPIFY_API_VERSION must be set in Variables (e.g., 2025-07)"; err=1; }
 
-          # Optional: India catalog id(s). If none set, code will search by title 'India'.
+          # Optional India catalog identifiers (your code can search by title if none provided)
           if [ -z "$V_INDIA_CATALOG_ID$V_INDIA_CATALOG_GID$V_INDIA_CATALOG" ]; then
-            echo "ℹ️ No INDIA_CATALOG_* variable set; code will search by title 'India'."
-          fi
-
-          # Helpful note: cron is */5, so ideally FREQUENCY_MINUTES is a multiple of 5
-          if [ $(( V_FREQUENCY_MINUTES % 5 )) -ne 0 ]; then
-            echo "⚠️ FREQUENCY_MINUTES is not a multiple of 5; cron is */5 so some ticks may be skipped."
+            echo "ℹ️ No INDIA_CATALOG_* variable set; code will search for catalog titled 'India'."
           fi
 
           exit $err
 
-      # ===== GATE: Running Time Start/End (IST) + frequency =====
-      - name: Running window & frequency gate (IST)
+      # ===== Running window (IST) + frequency gate (UTC minute-of-hour) =====
+      - name: Running window & frequency gate
         id: gate
         env:
           RUN_START_IST: ${{ vars.RUN_START_IST }}
@@ -101,7 +93,7 @@ jobs:
           echo "RUN_END_IST=$RUN_END_IST"
           echo "FREQUENCY_MINUTES=$FREQUENCY_MINUTES"
 
-          # 1) Running Time window (IST)
+          # 1) Running time window (IST)
           IST_HOUR=$(TZ=Asia/Kolkata date +%H)
           echo "Current IST hour=$IST_HOUR"
 
@@ -120,18 +112,19 @@ jobs:
             exit 0
           fi
 
-          # 2) Frequency gate (UTC minutes)
-          EPOCH_MIN=$(( $(date -u +%s) / 60 ))
-          if [ $(( EPOCH_MIN % FREQUENCY_MINUTES )) -ne 0 ]; then
+          # 2) Frequency gate using UTC minute-of-hour (aligns with cron minute)
+          UTC_MINUTE=$(date -u +%M)
+          echo "UTC minute-of-hour=$UTC_MINUTE"
+          if [ $(( 10#$UTC_MINUTE % FREQUENCY_MINUTES )) -ne 0 ]; then
             echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "⏸️  Skip: epoch_min=$EPOCH_MIN not divisible by FREQUENCY_MINUTES=$FREQUENCY_MINUTES"
+            echo "⏸️  Skip: minute $UTC_MINUTE not on $FREQUENCY_MINUTES-minute boundary."
             exit 0
           fi
 
           echo "should_run=true" >> $GITHUB_OUTPUT
           echo "✅ Gates passed."
 
-      # ===== Runtime .env (from Secrets/Variables) =====
+      # ===== Runtime .env for your script =====
       - name: Create runtime .env from GitHub Secrets/Variables
         if: steps.gate.outputs.should_run == 'true'
         run: |
@@ -156,7 +149,6 @@ jobs:
           echo "SHOPIFY_API_VERSION=$(grep SHOPIFY_API_VERSION .env | cut -d= -f2-)"
           echo "DRY_RUN=$(grep DRY_RUN .env | cut -d= -f2-)"
           echo "SHOPIFY_LOG_GRAPHQL_COSTS=$(grep SHOPIFY_LOG_GRAPHQL_COSTS .env | cut -d= -f2-)"
-          echo "INDIA_CATALOG_ID=$(grep INDIA_CATALOG_ID .env | cut -d= -f2-)"
 
       - name: Sanity check Shopify credentials (shop.name)
         if: steps.gate.outputs.should_run == 'true'
@@ -173,7 +165,7 @@ jobs:
           echo "Response: $RESP"
           echo "$RESP" | grep -q '"shop"' || { echo "❌ Shopify ping failed; check domain/token/scopes/API version"; exit 1; }
 
-      - name: Install deps (npm ci only)
+      - name: Install deps (npm ci)
         if: steps.gate.outputs.should_run == 'true'
         run: npm ci --no-audit --no-fund
 
