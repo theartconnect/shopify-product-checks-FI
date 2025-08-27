@@ -574,7 +574,7 @@ function buildFailureLines({
     lines.push('Mismatch in tax between composite and main product.');
   }
   if (linkCheckFailed) {
-    lines.push('None of the variant options with unit terms are linked to the required metafield.');
+    lines.push('None of the variant options which require bundling are linked to the "Variant Quantities" metaobject.');
   }
   if (duplicateSkus && duplicateSkus.size) {
     lines.push(`Duplicate SKUs found: ${[...duplicateSkus].join(', ')}`);
