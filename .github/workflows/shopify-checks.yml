@@ -2,26 +2,20 @@ name: Shopify Product Checks
 
 on:
   schedule:
-    - cron: "*/5 * * * *" # gate inside the job
-  workflow_dispatch:
-    inputs:
-      force:
-        description: "Force run now (bypass frequency & quiet hours)"
-        required: false
-        default: "true"
-  push:
-    branches: [ main, master ]
+    # every 10 minutes: 00,10,20,30,40,50
+    - cron: "*/10 * * * *"
 
 permissions:
   contents: read
 
 env:
-  SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
-  DRY_RUN: ${{ vars.DRY_RUN }}
-  SHOPIFY_LOG_GRAPHQL_COSTS: ${{ vars.SHOPIFY_LOG_GRAPHQL_COSTS }}
-  RUN_EVERY_MINUTES: ${{ vars.RUN_EVERY_MINUTES }}
-  QUIET_START_IST: ${{ vars.QUIET_START_IST }}
-  QUIET_END_IST: ${{ vars.QUIET_END_IST }}
+  # Optional repo Variables (Settings → Secrets and variables → Actions → Variables)
+  # If you don't set them, the gate step below uses safe defaults.
+  SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}   # optional; index.js defaults to 2025-07
+  DRY_RUN: ${{ vars.DRY_RUN }}                           # optional: 'true' or 'false'
+  SHOPIFY_LOG_GRAPHQL_COSTS: ${{ vars.SHOPIFY_LOG_GRAPHQL_COSTS }}  # optional: 'true'
+  QUIET_START_IST: ${{ vars.QUIET_START_IST }}           # e.g. 23
+  QUIET_END_IST: ${{ vars.QUIET_END_IST }}               # e.g. 8
 
 jobs:
   run:
@@ -29,10 +23,9 @@ jobs:
     timeout-minutes: 55
 
     steps:
-      - name: Show trigger information
+      - name: Show trigger info
         run: |
           echo "event_name=${{ github.event_name }}"
-          echo "manual_force=${{ github.event.inputs.force }}"
           echo "ref=${{ github.ref }}"
           echo "sha=${{ github.sha }}"
 
@@ -45,53 +38,39 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Frequency & quiet-hours gate (IST), with manual override
+      # Quiet-hours only (Asia/Kolkata). No frequency gate anymore.
+      - name: Quiet-hours gate (IST only)
         id: gate
         shell: bash
         run: |
-          EVENT="${{ github.event_name }}"
-          RUN_EVERY_MINUTES="${RUN_EVERY_MINUTES:-10}"
-          QUIET_START_IST="${QUIET_START_IST:-0}"
-          QUIET_END_IST="${QUIET_END_IST:-8}"
+          QUIET_START_IST="${QUIET_START_IST:-23}"  # default: quiet from 23:00…
+          QUIET_END_IST="${QUIET_END_IST:-8}"      # …to 08:00 (runs in daytime)
 
-          echo "RUN_EVERY_MINUTES=$RUN_EVERY_MINUTES"
           echo "QUIET_START_IST=$QUIET_START_IST"
           echo "QUIET_END_IST=$QUIET_END_IST"
-          echo "EVENT=$EVENT"
 
-          # Manual or push: always run
-          if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "push" ]; then
-            echo "should_run=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # Frequency gate for scheduled runs
-          EPOCH_MIN=$(( $(date -u +%s) / 60 ))
-          if [ $(( EPOCH_MIN % RUN_EVERY_MINUTES )) -ne 0 ]; then
-            echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "Skip (frequency gate): epoch_min=$EPOCH_MIN not divisible by $RUN_EVERY_MINUTES"
-            exit 0
-          fi
-
-          # Quiet-hours gate (Asia/Kolkata)
           IST_HOUR=$(TZ=Asia/Kolkata date +%H)
+          echo "Current IST hour=$IST_HOUR"
+
           QUIET=0
           if [ "$QUIET_START_IST" -le "$QUIET_END_IST" ]; then
+            # same-day window [START, END)
             if [ "$IST_HOUR" -ge "$QUIET_START_IST" ] && [ "$IST_HOUR" -lt "$QUIET_END_IST" ]; then QUIET=1; fi
           else
+            # overnight window (e.g., 23 → 08)
             if [ "$IST_HOUR" -ge "$QUIET_START_IST" ] || [ "$IST_HOUR" -lt "$QUIET_END_IST" ]; then QUIET=1; fi
           fi
 
           if [ "$QUIET" -eq 1 ]; then
             echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "Skip (quiet hours)."
+            echo "Skip: within quiet hours."
             exit 0
           fi
 
           echo "should_run=true" >> $GITHUB_OUTPUT
-          echo "Gates passed."
+          echo "Proceeding: outside quiet hours."
 
-      - name: Create runtime .env from GitHub Secrets/Variables
+      - name: Create runtime .env from Secrets/Variables
         if: steps.gate.outputs.should_run == 'true'
         run: |
           cat > .env <<'EOF'
@@ -113,21 +92,7 @@ jobs:
           echo "DRY_RUN=$(grep DRY_RUN .env | cut -d= -f2-)"
           echo "SHOPIFY_LOG_GRAPHQL_COSTS=$(grep SHOPIFY_LOG_GRAPHQL_COSTS .env | cut -d= -f2-)"
 
-      - name: Sanity check Shopify credentials (shop.name)
-        if: steps.gate.outputs.should_run == 'true'
-        shell: bash
-        run: |
-          set -e
-          DOMAIN=$(grep SHOPIFY_STORE_DOMAIN .env | cut -d= -f2-)
-          TOKEN=$(grep SHOPIFY_ADMIN_ACCESS_TOKEN .env | cut -d= -f2-)
-          APIV=$(grep SHOPIFY_API_VERSION .env | cut -d= -f2-)
-          echo "Pinging https://$DOMAIN/admin/api/$APIV/graphql.json ..."
-          RESP=$(curl -sS -X POST "https://$DOMAIN/admin/api/$APIV/graphql.json" \
-            -H "X-Shopify-Access-Token: $TOKEN" -H "Content-Type: application/json" \
-            --data '{"query":"{ shop { name } }"}')
-          echo "Response: $RESP"
-          echo "$RESP" | grep -q '"shop"' || { echo "❌ Shopify ping failed; check domain/token/scopes"; exit 1; }
-
+      # Use npm ci if lockfile exists; else fallback to npm install
       - name: Install deps (ci)
         if: steps.gate.outputs.should_run == 'true' && hashFiles('**/package-lock.json') != ''
         run: npm ci --no-audit --no-fund
@@ -135,10 +100,6 @@ jobs:
       - name: Install deps (install fallback)
         if: steps.gate.outputs.should_run == 'true' && hashFiles('**/package-lock.json') == ''
         run: npm install --no-audit --no-fund
-
-      - name: Enable verbose logs (optional)
-        if: steps.gate.outputs.should_run == 'true' && env.SHOPIFY_LOG_GRAPHQL_COSTS == 'true'
-        run: echo "Verbose Shopify GQL cost logs enabled."
 
       - name: Run script
         if: steps.gate.outputs.should_run == 'true'
