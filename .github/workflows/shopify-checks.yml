@@ -1,24 +1,30 @@
-name: Shopify Product Checks (every 5m + run window)
+name: Shopify Product Checks (every 5m)
 
 on:
-  # Manual run
-  workflow_dispatch: {}
-  # Every 5 minutes (GitHub cron is wall-clock based)
   schedule:
+    # Every 5 minutes (UTC). Best-effort; may drift by a minute or two.
     - cron: "*/5 * * * *"
+  # Keep manual trigger for testing; remove this block if you don't want it.
+  workflow_dispatch: {}
 
 permissions:
   contents: read
 
+concurrency:
+  group: shopify-product-checks
+  cancel-in-progress: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Show trigger info & time
+      - name: Show trigger information & time
         run: |
           echo "event_name=${{ github.event_name }}"
-          date -u +"UTC now: %Y-%m-%d %H:%M:%S"
-          TZ=Asia/Kolkata date +"IST now: %Y-%m-%d %H:%M:%S"
+          echo "ref=${{ github.ref }}"
+          echo "sha=${{ github.sha }}"
+          echo "UTC now: $(date -u '+%Y-%m-%d %H:%M:%S')"
 
       - name: Check out repo
         uses: actions/checkout@v4
@@ -29,79 +35,59 @@ jobs:
           node-version: 22
           cache: npm
 
-      # Require these to exist — no fallbacks
       - name: Validate required Secrets/Variables
+        env:
+          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN || vars.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN || vars.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN || vars.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID || vars.SLACK_CHANNEL_ID }}
         run: |
           set -e
-          need_secret () { v="$1"; [ -n "${!v}" ] || { echo "::error::Missing required secret: $v"; exit 1; }; }
-          need_var ()    { v="$1"; [ -n "${!v}" ] || { echo "::error::Missing required variable: $v"; exit 1; }; }
-          need_secret SHOPIFY_STORE_DOMAIN
-          need_secret SHOPIFY_ADMIN_ACCESS_TOKEN
-          need_secret SLACK_BOT_TOKEN
-          need_secret SLACK_CHANNEL_ID
-          need_var    RUN_START_IST
-          need_var    RUN_END_IST
-          need_var    SHOPIFY_API_VERSION
-        env:
-          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
-          SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-          RUN_START_IST: ${{ vars.RUN_START_IST }}
-          RUN_END_IST: ${{ vars.RUN_END_IST }}
-          SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
-
-      - name: Running window gate (IST only)
-        id: gate
-        run: |
-          set -e
-          echo "RUN_START_IST=${RUN_START_IST}"
-          echo "RUN_END_IST=${RUN_END_IST}"
-          IST_HOUR=$(TZ=Asia/Kolkata date +%H)
-          echo "Current IST hour=${IST_HOUR}"
-          if [ "$IST_HOUR" -lt "$RUN_START_IST" ] || [ "$IST_HOUR" -ge "$RUN_END_IST" ]; then
-            echo "Outside run window; skipping."
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "Gates passed."
-          echo "should_run=true" >> "$GITHUB_OUTPUT"
-        env:
-          RUN_START_IST: ${{ vars.RUN_START_IST }}
-          RUN_END_IST:   ${{ vars.RUN_END_IST }}
+          : "${SHOPIFY_STORE_DOMAIN:?Missing SHOPIFY_STORE_DOMAIN (secret or var)}"
+          : "${SHOPIFY_ADMIN_ACCESS_TOKEN:?Missing SHOPIFY_ADMIN_ACCESS_TOKEN (secret or var)}"
+          : "${SLACK_BOT_TOKEN:?Missing SLACK_BOT_TOKEN (secret or var)}"
+          : "${SLACK_CHANNEL_ID:?Missing SLACK_CHANNEL_ID (secret or var)}"
+          echo "All required secrets/vars are present."
 
       - name: Create runtime .env from GitHub Secrets/Variables
-        if: steps.gate.outputs.should_run == 'true'
-        run: |
-          cat > .env <<EOF
-          SHOPIFY_STORE_DOMAIN=${{ secrets.SHOPIFY_STORE_DOMAIN }}
-          SHOPIFY_ADMIN_ACCESS_TOKEN=${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
-          SLACK_BOT_TOKEN=${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID=${{ secrets.SLACK_CHANNEL_ID }}
-          SHOPIFY_API_VERSION=${{ vars.SHOPIFY_API_VERSION }}
-          DRY_RUN=${{ vars.DRY_RUN }}
-          SHOPIFY_LOG_GRAPHQL_COSTS=${{ vars.SHOPIFY_LOG_GRAPHQL_COSTS }}
-          EOF
-
-      - name: Sanity check Shopify credentials (shop.name)
-        if: steps.gate.outputs.should_run == 'true'
+        env:
+          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN || vars.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN || vars.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN || vars.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID || vars.SLACK_CHANNEL_ID }}
+          # Optional vars
+          SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
+          DRY_RUN: ${{ vars.DRY_RUN }}
+          SHOPIFY_LOG_GRAPHQL_COSTS: ${{ vars.SHOPIFY_LOG_GRAPHQL_COSTS }}
         run: |
           set -e
-          URL="https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/graphql.json"
-          echo "Pinging $URL ..."
-          curl -sS -H "X-Shopify-Access-Token: ${SHOPIFY_ADMIN_ACCESS_TOKEN}" \
-               -H "Content-Type: application/json" \
-               --data '{"query":"{ shop { name } }"}' \
-               "$URL"
-        env:
-          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
-          SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
-          SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
+          cat > .env <<EOF
+          SHOPIFY_STORE_DOMAIN=${SHOPIFY_STORE_DOMAIN}
+          SHOPIFY_ADMIN_ACCESS_TOKEN=${SHOPIFY_ADMIN_ACCESS_TOKEN}
+          SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+          SLACK_CHANNEL_ID=${SLACK_CHANNEL_ID}
+          SHOPIFY_API_VERSION=${SHOPIFY_API_VERSION}
+          DRY_RUN=${DRY_RUN}
+          SHOPIFY_LOG_GRAPHQL_COSTS=${SHOPIFY_LOG_GRAPHQL_COSTS}
+          EOF
+          echo ".env created for this run."
 
-      - name: Install deps (npm ci)
-        if: steps.gate.outputs.should_run == 'true'
+      - name: Install deps (ci)
         run: npm ci
 
+      - name: Sanity check Shopify credentials (shop.name)
+        env:
+          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN || vars.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN || vars.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
+        run: |
+          set -e
+          API_VER="${SHOPIFY_API_VERSION:-2025-07}"
+          echo "Pinging https://${SHOPIFY_STORE_DOMAIN}/admin/api/${API_VER}/graphql.json ..."
+          curl -sS -X POST "https://${SHOPIFY_STORE_DOMAIN}/admin/api/${API_VER}/graphql.json" \
+            -H "X-Shopify-Access-Token: ${SHOPIFY_ADMIN_ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data '{"query":"{ shop { name } }"}' | tee /tmp/ping.json
+
       - name: Run script
-        if: steps.gate.outputs.should_run == 'true'
         run: node index.js
