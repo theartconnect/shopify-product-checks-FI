@@ -1,21 +1,17 @@
-name: Shopify Product Checks
+name: Shopify Product Checks (cron + run window + frequency)
 
 on:
   schedule:
-    # every 10 minutes: 00,10,20,30,40,50
-    - cron: "*/10 * * * *"
+    # Base tick: every 5 minutes (UTC). The gate below enforces your FREQUENCY_MINUTES.
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: read
 
-env:
-  # Optional repo Variables (Settings → Secrets and variables → Actions → Variables)
-  # If you don't set them, the gate step below uses safe defaults.
-  SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}   # optional; index.js defaults to 2025-07
-  DRY_RUN: ${{ vars.DRY_RUN }}                           # optional: 'true' or 'false'
-  SHOPIFY_LOG_GRAPHQL_COSTS: ${{ vars.SHOPIFY_LOG_GRAPHQL_COSTS }}  # optional: 'true'
-  QUIET_START_IST: ${{ vars.QUIET_START_IST }}           # e.g. 23
-  QUIET_END_IST: ${{ vars.QUIET_END_IST }}               # e.g. 8
+# Prevent overlapping runs
+concurrency:
+  group: shopify-product-checks
+  cancel-in-progress: true
 
 jobs:
   run:
@@ -23,11 +19,13 @@ jobs:
     timeout-minutes: 55
 
     steps:
-      - name: Show trigger info
+      - name: Show trigger info & time
         run: |
           echo "event_name=${{ github.event_name }}"
           echo "ref=${{ github.ref }}"
           echo "sha=${{ github.sha }}"
+          echo "UTC now: $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "IST now:  $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M:%S')"
 
       - name: Check out repo
         uses: actions/checkout@v4
@@ -38,49 +36,111 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      # Quiet-hours only (Asia/Kolkata). No frequency gate anymore.
-      - name: Quiet-hours gate (IST only)
+      # ===== HARD VALIDATION (no defaults) =====
+      - name: Validate required Secrets/Variables
+        env:
+          S_SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          S_SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          S_SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          S_SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+
+          V_RUN_START_IST: ${{ vars.RUN_START_IST }}
+          V_RUN_END_IST: ${{ vars.RUN_END_IST }}
+          V_FREQUENCY_MINUTES: ${{ vars.FREQUENCY_MINUTES }}
+          V_SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
+
+          # India Catalog (optional, your code can fallback to title "India")
+          V_INDIA_CATALOG_ID: ${{ vars.INDIA_CATALOG_ID }}
+          V_INDIA_CATALOG_GID: ${{ vars.INDIA_CATALOG_GID }}
+          V_INDIA_CATALOG: ${{ vars.INDIA_CATALOG }}
+        run: |
+          err=0
+          # Required Secrets
+          [ -n "$S_SHOPIFY_STORE_DOMAIN" ] || { echo "❌ Missing secret: SHOPIFY_STORE_DOMAIN"; err=1; }
+          [ -n "$S_SHOPIFY_ADMIN_ACCESS_TOKEN" ] || { echo "❌ Missing secret: SHOPIFY_ADMIN_ACCESS_TOKEN"; err=1; }
+          [ -n "$S_SLACK_BOT_TOKEN" ] || { echo "❌ Missing secret: SLACK_BOT_TOKEN"; err=1; }
+          [ -n "$S_SLACK_CHANNEL_ID" ] || { echo "❌ Missing secret: SLACK_CHANNEL_ID"; err=1; }
+
+          # Required Variables (run window + frequency + API version)
+          is_int_0_23 () { case "$1" in (""|*[!0-9]* ) return 1;; (*) [ "$1" -ge 0 ] && [ "$1" -le 23 ];; esac; }
+          is_pos_int () { case "$1" in (""|*[!0-9]*|0) return 1;; (*) return 0;; esac; }
+
+          is_int_0_23 "$V_RUN_START_IST" || { echo "❌ RUN_START_IST must be an integer 0–23 (Variables)"; err=1; }
+          is_int_0_23 "$V_RUN_END_IST"   || { echo "❌ RUN_END_IST must be an integer 0–23 (Variables)"; err=1; }
+          is_pos_int "$V_FREQUENCY_MINUTES" || { echo "❌ FREQUENCY_MINUTES must be a positive integer (Variables)"; err=1; }
+          [ -n "$V_SHOPIFY_API_VERSION" ] || { echo "❌ SHOPIFY_API_VERSION must be set in Variables (e.g., 2025-07)"; err=1; }
+
+          # Optional: India catalog id(s). If none are set, index.js will try to find title 'India'.
+          if [ -z "$V_INDIA_CATALOG_ID$V_INDIA_CATALOG_GID$V_INDIA_CATALOG" ]; then
+            echo "ℹ️ No INDIA_CATALOG_* variable set; code will search by title 'India'."
+          fi
+
+          # Helpful note: with cron */5, best to make FREQUENCY_MINUTES a multiple of 5.
+          if [ $(( V_FREQUENCY_MINUTES % 5 )) -ne 0 ]; then
+            echo "⚠️ FREQUENCY_MINUTES is not a multiple of 5; cron schedule is */5 so some ticks may be skipped."
+          fi
+
+          exit $err
+
+      # ===== GATE: Running window (IST) + frequency =====
+      - name: Running window & frequency gate (IST)
         id: gate
+        env:
+          RUN_START_IST: ${{ vars.RUN_START_IST }}
+          RUN_END_IST: ${{ vars.RUN_END_IST }}
+          FREQUENCY_MINUTES: ${{ vars.FREQUENCY_MINUTES }}
         shell: bash
         run: |
-          QUIET_START_IST="${QUIET_START_IST:-23}"  # default: quiet from 23:00…
-          QUIET_END_IST="${QUIET_END_IST:-8}"      # …to 08:00 (runs in daytime)
+          set -e
+          echo "RUN_START_IST=$RUN_START_IST"
+          echo "RUN_END_IST=$RUN_END_IST"
+          echo "FREQUENCY_MINUTES=$FREQUENCY_MINUTES"
 
-          echo "QUIET_START_IST=$QUIET_START_IST"
-          echo "QUIET_END_IST=$QUIET_END_IST"
-
+          # 1) Running Time window (IST)
           IST_HOUR=$(TZ=Asia/Kolkata date +%H)
           echo "Current IST hour=$IST_HOUR"
 
-          QUIET=0
-          if [ "$QUIET_START_IST" -le "$QUIET_END_IST" ]; then
-            # same-day window [START, END)
-            if [ "$IST_HOUR" -ge "$QUIET_START_IST" ] && [ "$IST_HOUR" -lt "$QUIET_END_IST" ]; then QUIET=1; fi
+          IN_WINDOW=0
+          if [ "$RUN_START_IST" -le "$RUN_END_IST" ]; then
+            # Same-day window [start, end)
+            if [ "$IST_HOUR" -ge "$RUN_START_IST" ] && [ "$IST_HOUR" -lt "$RUN_END_IST" ]; then IN_WINDOW=1; fi
           else
-            # overnight window (e.g., 23 → 08)
-            if [ "$IST_HOUR" -ge "$QUIET_START_IST" ] || [ "$IST_HOUR" -lt "$QUIET_END_IST" ]; then QUIET=1; fi
+            # Overnight window (e.g., 22 → 06)
+            if [ "$IST_HOUR" -ge "$RUN_START_IST" ] || [ "$IST_HOUR" -lt "$RUN_END_IST" ]; then IN_WINDOW=1; fi
           fi
 
-          if [ "$QUIET" -eq 1 ]; then
+          if [ "$IN_WINDOW" -ne 1 ]; then
             echo "should_run=false" >> $GITHUB_OUTPUT
-            echo "Skip: within quiet hours."
+            echo "⏸️  Skip: outside Running Time window."
+            exit 0
+          fi
+
+          # 2) Frequency gate (UTC minutes)
+          EPOCH_MIN=$(( $(date -u +%s) / 60 ))
+          if [ $(( EPOCH_MIN % FREQUENCY_MINUTES )) -ne 0 ]; then
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "⏸️  Skip: epoch_min=$EPOCH_MIN not divisible by FREQUENCY_MINUTES=$FREQUENCY_MINUTES"
             exit 0
           fi
 
           echo "should_run=true" >> $GITHUB_OUTPUT
-          echo "Proceeding: outside quiet hours."
+          echo "✅ Gates passed."
 
-      - name: Create runtime .env from Secrets/Variables
+      # ===== Runtime .env (from Secrets/Variables) =====
+      - name: Create runtime .env from GitHub Secrets/Variables
         if: steps.gate.outputs.should_run == 'true'
         run: |
           cat > .env <<'EOF'
           SHOPIFY_STORE_DOMAIN=${{ secrets.SHOPIFY_STORE_DOMAIN }}
           SHOPIFY_ADMIN_ACCESS_TOKEN=${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
-          SHOPIFY_API_VERSION=${{ env.SHOPIFY_API_VERSION }}
+          SHOPIFY_API_VERSION=${{ vars.SHOPIFY_API_VERSION }}
           SLACK_BOT_TOKEN=${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID=${{ secrets.SLACK_CHANNEL_ID }}
-          DRY_RUN=${{ env.DRY_RUN }}
-          SHOPIFY_LOG_GRAPHQL_COSTS=${{ env.SHOPIFY_LOG_GRAPHQL_COSTS }}
+          DRY_RUN=${{ vars.DRY_RUN }}
+          SHOPIFY_LOG_GRAPHQL_COSTS=${{ vars.SHOPIFY_LOG_GRAPHQL_COSTS }}
+          INDIA_CATALOG_ID=${{ vars.INDIA_CATALOG_ID }}
+          INDIA_CATALOG_GID=${{ vars.INDIA_CATALOG_GID }}
+          INDIA_CATALOG=${{ vars.INDIA_CATALOG }}
           EOF
           echo "Wrote .env"
 
@@ -91,15 +151,26 @@ jobs:
           echo "SHOPIFY_API_VERSION=$(grep SHOPIFY_API_VERSION .env | cut -d= -f2-)"
           echo "DRY_RUN=$(grep DRY_RUN .env | cut -d= -f2-)"
           echo "SHOPIFY_LOG_GRAPHQL_COSTS=$(grep SHOPIFY_LOG_GRAPHQL_COSTS .env | cut -d= -f2-)"
+          echo "INDIA_CATALOG_ID=$(grep INDIA_CATALOG_ID .env | cut -d= -f2-)"
 
-      # Use npm ci if lockfile exists; else fallback to npm install
-      - name: Install deps (ci)
-        if: steps.gate.outputs.should_run == 'true' && hashFiles('**/package-lock.json') != ''
+      - name: Sanity check Shopify credentials (shop.name)
+        if: steps.gate.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          set -e
+          DOMAIN=$(grep SHOPIFY_STORE_DOMAIN .env | cut -d= -f2-)
+          TOKEN=$(grep SHOPIFY_ADMIN_ACCESS_TOKEN .env | cut -d= -f2-)
+          APIV=$(grep SHOPIFY_API_VERSION .env | cut -d= -f2-)
+          echo "Pinging https://$DOMAIN/admin/api/${APIV}/graphql.json ..."
+          RESP=$(curl -sS -X POST "https://$DOMAIN/admin/api/$APIV/graphql.json" \
+            -H "X-Shopify-Access-Token: $TOKEN" -H "Content-Type: application/json" \
+            --data '{"query":"{ shop { name } }"}')
+          echo "Response: $RESP"
+          echo "$RESP" | grep -q '"shop"' || { echo "❌ Shopify ping failed; check domain/token/scopes/API version"; exit 1; }
+
+      - name: Install deps (npm ci only)
+        if: steps.gate.outputs.should_run == 'true'
         run: npm ci --no-audit --no-fund
-
-      - name: Install deps (install fallback)
-        if: steps.gate.outputs.should_run == 'true' && hashFiles('**/package-lock.json') == ''
-        run: npm install --no-audit --no-fund
 
       - name: Run script
         if: steps.gate.outputs.should_run == 'true'
