@@ -1,19 +1,16 @@
-name: Shopify Product Checks (every 5m)
+name: Shopify Product Checks (every 5m with IST window)
 
 on:
   schedule:
-    # Phase A: 00,10,20,30,40,50 each hour (UTC)
+    # Phase A: 00,10,20,30,40,50 (UTC)
     - cron: "0/10 * * * *"
-    # Phase B: 05,15,25,35,45,55 each hour (UTC)
+    # Phase B: 05,15,25,35,45,55 (UTC)
     - cron: "5/10 * * * *"
-  # Keep manual trigger for testing. Remove if you never want manual runs.
   workflow_dispatch: {}
 
 permissions:
   contents: read
 
-# Ensure only one run at a time. If phase B fires while phase A is still running,
-# the new one will cancel the old one instead of running in parallel.
 concurrency:
   group: shopify-product-checks
   cancel-in-progress: true
@@ -29,6 +26,7 @@ jobs:
           echo "ref=${{ github.ref }}"
           echo "sha=${{ github.sha }}"
           echo "UTC now: $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "IST now: $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M:%S')"
 
       - name: Check out repo
         uses: actions/checkout@v4
@@ -39,29 +37,63 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Require window variables (no defaults)
+      - name: Validate required window Variables
+        env:
+          RUN_START_IST: ${{ vars.RUN_START_IST }}
+          RUN_END_IST:   ${{ vars.RUN_END_IST }}
+        run: |
+          set -e
+          : "${RUN_START_IST:?Missing RUN_START_IST repository Variable (0-23)}"
+          : "${RUN_END_IST:?Missing RUN_END_IST repository Variable (0-23)}"
+          echo "Run window (IST): ${RUN_START_IST} -> ${RUN_END_IST}"
+
+      # Enforce IST window; skip cleanly if outside
+      - name: Enforce IST run window
+        env:
+          RUN_START_IST: ${{ vars.RUN_START_IST }}
+          RUN_END_IST:   ${{ vars.RUN_END_IST }}
+        run: |
+          set -e
+          NOW_HOUR=$(TZ=Asia/Kolkata date +%H)
+          SHOULD=0
+          if [ "$RUN_START_IST" -le "$RUN_END_IST" ]; then
+            # e.g., 08..23
+            if [ "$NOW_HOUR" -ge "$RUN_START_IST" ] && [ "$NOW_HOUR" -lt "$RUN_END_IST" ]; then SHOULD=1; fi
+          else
+            # window wraps midnight, e.g., 22..06
+            if [ "$NOW_HOUR" -ge "$RUN_START_IST" ] || [ "$NOW_HOUR" -lt "$RUN_END_IST" ]; then SHOULD=1; fi
+          fi
+
+          echo "Current IST hour=${NOW_HOUR}; should_run=${SHOULD}"
+          if [ "$SHOULD" -ne 1 ]; then
+            echo "Outside IST window; skipping job."
+            exit 0
+          fi
+
       - name: Validate required Secrets/Variables
         env:
-          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN || vars.SHOPIFY_STORE_DOMAIN }}
-          SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN || vars.SHOPIFY_ADMIN_ACCESS_TOKEN }}
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN || vars.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID || vars.SLACK_CHANNEL_ID }}
+          SHOPIFY_STORE_DOMAIN:        ${{ secrets.SHOPIFY_STORE_DOMAIN || vars.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_ACCESS_TOKEN:  ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN || vars.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          SLACK_BOT_TOKEN:             ${{ secrets.SLACK_BOT_TOKEN || vars.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID:            ${{ secrets.SLACK_CHANNEL_ID || vars.SLACK_CHANNEL_ID }}
         run: |
           set -e
           : "${SHOPIFY_STORE_DOMAIN:?Missing SHOPIFY_STORE_DOMAIN (secret or var)}"
           : "${SHOPIFY_ADMIN_ACCESS_TOKEN:?Missing SHOPIFY_ADMIN_ACCESS_TOKEN (secret or var)}"
           : "${SLACK_BOT_TOKEN:?Missing SLACK_BOT_TOKEN (secret or var)}"
           : "${SLACK_CHANNEL_ID:?Missing SLACK_CHANNEL_ID (secret or var)}"
-          echo "All required secrets/vars are present."
+          echo "Core secrets/vars present."
 
       - name: Create runtime .env from GitHub Secrets/Variables
         env:
-          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN || vars.SHOPIFY_STORE_DOMAIN }}
-          SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN || vars.SHOPIFY_ADMIN_ACCESS_TOKEN }}
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN || vars.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID || vars.SLACK_CHANNEL_ID }}
-          SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
-          DRY_RUN: ${{ vars.DRY_RUN }}
-          SHOPIFY_LOG_GRAPHQL_COSTS: ${{ vars.SHOPIFY_LOG_GRAPHQL_COSTS }}
+          SHOPIFY_STORE_DOMAIN:        ${{ secrets.SHOPIFY_STORE_DOMAIN || vars.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_ACCESS_TOKEN:  ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN || vars.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          SLACK_BOT_TOKEN:             ${{ secrets.SLACK_BOT_TOKEN || vars.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID:            ${{ secrets.SLACK_CHANNEL_ID || vars.SLACK_CHANNEL_ID }}
+          SHOPIFY_API_VERSION:         ${{ vars.SHOPIFY_API_VERSION }}
+          DRY_RUN:                     ${{ vars.DRY_RUN }}
+          SHOPIFY_LOG_GRAPHQL_COSTS:   ${{ vars.SHOPIFY_LOG_GRAPHQL_COSTS }}
         run: |
           set -e
           cat > .env <<EOF
@@ -73,16 +105,16 @@ jobs:
           DRY_RUN=${DRY_RUN}
           SHOPIFY_LOG_GRAPHQL_COSTS=${SHOPIFY_LOG_GRAPHQL_COSTS}
           EOF
-          echo ".env created for this run."
+          echo ".env created for this run (not committed)."
 
-      - name: Install deps (ci)
+      - name: Install deps (npm ci only)
         run: npm ci
 
       - name: Sanity check Shopify credentials (shop.name)
         env:
-          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN || vars.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_STORE_DOMAIN:       ${{ secrets.SHOPIFY_STORE_DOMAIN || vars.SHOPIFY_STORE_DOMAIN }}
           SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN || vars.SHOPIFY_ADMIN_ACCESS_TOKEN }}
-          SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
+          SHOPIFY_API_VERSION:        ${{ vars.SHOPIFY_API_VERSION }}
         run: |
           set -e
           API_VER="${SHOPIFY_API_VERSION:-2025-07}"
