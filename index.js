@@ -854,7 +854,7 @@ async function run() {
       const hasNewProductChecks = productChanges.includes(LABEL_NEW_PRODUCT_CHECKS);
 
       // Slack base message & bucket
-      let slackMsg = `Product "${p.title}"`;
+      let slackMsg = `FI Store - Product "${p.title}"`;
       const slackParts = [];
 
       if (!hasNewProductChecks && !hadMakeTests) continue;
