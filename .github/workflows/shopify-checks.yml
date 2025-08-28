@@ -25,15 +25,15 @@ jobs:
       - name: Validate required Secrets/Variables
         shell: bash
         env:
-          SHOPIFY_STORE_DOMAIN:      ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_STORE_DOMAIN:       ${{ secrets.SHOPIFY_STORE_DOMAIN }}
           SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
-          SLACK_BOT_TOKEN:           ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID:          ${{ secrets.SLACK_CHANNEL_ID }}
-          RUN_START_IST:             ${{ vars.RUN_START_IST }}        # e.g. 8  (08:00 IST)
-          RUN_END_IST:               ${{ vars.RUN_END_IST }}          # e.g. 23 (23:00 IST)
-          FREQUENCY_MINUTES:         ${{ vars.FREQUENCY_MINUTES }}    # e.g. 5
-          SHOPIFY_API_VERSION:       ${{ vars.SHOPIFY_API_VERSION }}  # e.g. 2025-07
-          DRY_RUN:                   ${{ vars.DRY_RUN }}              # "true" or "false"
+          SLACK_BOT_TOKEN:            ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID:           ${{ secrets.SLACK_CHANNEL_ID }}
+          RUN_START_IST:              ${{ vars.RUN_START_IST }}        # e.g. 8  (08:00 IST)
+          RUN_END_IST:                ${{ vars.RUN_END_IST }}          # e.g. 23 (23:00 IST)
+          FREQUENCY_MINUTES:          ${{ vars.FREQUENCY_MINUTES }}    # e.g. 5 (used only for display if you add a gate)
+          SHOPIFY_API_VERSION:        ${{ vars.SHOPIFY_API_VERSION }}  # e.g. 2025-07
+          DRY_RUN:                    ${{ vars.DRY_RUN }}              # "true" or "false"
         run: |
           set -euo pipefail
           missing=()
@@ -71,7 +71,11 @@ jobs:
             if [ "$NOW_HOUR" -ge "$RUN_START_IST" ] || [ "$NOW_HOUR" -lt "$RUN_END_IST" ]; then SHOULD=1; fi
           fi
           echo "Current IST hour=${NOW_HOUR}; should_run=${SHOULD}"
-          echo "should_run=$([ "$SHOULD" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          if [ "$SHOULD" -eq 1 ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Check out repo
         if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
@@ -89,12 +93,12 @@ jobs:
         if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
         shell: bash
         env:
-          SHOPIFY_STORE_DOMAIN:      ${{ secrets.SHOPIFY_STORE_DOMAIN }}
-          SHOPIFY_ADMIN_ACCESS_TOKEN:${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
-          SLACK_BOT_TOKEN:           ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID:          ${{ secrets.SLACK_CHANNEL_ID }}
-          SHOPIFY_API_VERSION:       ${{ vars.SHOPIFY_API_VERSION }}
-          DRY_RUN:                   ${{ vars.DRY_RUN }}
+          SHOPIFY_STORE_DOMAIN:       ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          SLACK_BOT_TOKEN:            ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID:           ${{ secrets.SLACK_CHANNEL_ID }}
+          SHOPIFY_API_VERSION:        ${{ vars.SHOPIFY_API_VERSION }}
+          DRY_RUN:                    ${{ vars.DRY_RUN }}
         run: |
           set -euo pipefail
           cat > .env <<EOF
