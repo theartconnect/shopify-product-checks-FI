@@ -1257,10 +1257,6 @@ async function run() {
     after = conn.pageInfo.endCursor;
   }
 
-  if (matchedAny === 0) {
-     await slackPost('Product Changes metafield was checked and none of the products need attention.');
-  }
-
   const last = apiStats.last || {};
   console.log(
     `Summary: scanned=${processed}; with_product_changes=${matchedAny}; passed=${passed}; failed=${failed}; mode=${IS_DRY_RUN ? 'DRY RUN' : 'LIVE'}`
