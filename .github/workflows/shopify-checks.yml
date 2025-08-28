@@ -1,55 +1,63 @@
-name: Shopify Product Checks (every 5m with IST window)
+name: Shopify Product Checks (every 5m + IST run window)
 
 on:
   schedule:
-    # Phase A: 00,10,20,30,40,50 (UTC)
-    - cron: "0/10 * * * *"
-    # Phase B: 05,15,25,35,45,55 (UTC)
-    - cron: "5/10 * * * *"
-  workflow_dispatch: {}
+    - cron: "*/5 * * * *"   # every 5 minutes (UTC)
+  workflow_dispatch:        # allow manual runs
 
 permissions:
   contents: read
 
-concurrency:
-  group: shopify-product-checks
-  cancel-in-progress: true
-
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Show trigger info & time
+        shell: bash
         run: |
-          echo "event_name=${{ github.event_name }}"
-          echo "ref=${{ github.ref }}"
-          echo "sha=${{ github.sha }}"
-          echo "UTC now: $(date -u '+%Y-%m-%d %H:%M:%S')"
-          echo "IST now: $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M:%S')"
+          echo "event_name=${GITHUB_EVENT_NAME}"
+          date -u +"UTC time now: %Y-%m-%d %H:%M:%S"
+          TZ=Asia/Kolkata date +"IST time now: %Y-%m-%d %H:%M:%S"
 
-      - name: Check out repo
-        uses: actions/checkout@v4
-
-      - name: Use Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      # Require window variables (no defaults)
-      - name: Validate required window Variables
+      # -------- REQUIRED inputs (no defaults!). Fail immediately if any are missing. --------
+      - name: Validate required Secrets/Variables
+        shell: bash
         env:
-          RUN_START_IST: ${{ vars.RUN_START_IST }}
-          RUN_END_IST:   ${{ vars.RUN_END_IST }}
+          SHOPIFY_STORE_DOMAIN:      ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_ACCESS_TOKEN:${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          SLACK_BOT_TOKEN:           ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID:          ${{ secrets.SLACK_CHANNEL_ID }}
+          RUN_START_IST:             ${{ vars.RUN_START_IST }}        # e.g. 8  (08:00 IST)
+          RUN_END_IST:               ${{ vars.RUN_END_IST }}          # e.g. 23 (23:00 IST)
+          FREQUENCY_MINUTES:         ${{ vars.FREQUENCY_MINUTES }}    # e.g. 5
+          SHOPIFY_API_VERSION:       ${{ vars.SHOPIFY_API_VERSION }}  # e.g. 2025-07
+          DRY_RUN:                   ${{ vars.DRY_RUN }}              # "true" or "false"
         run: |
-          set -e
-          : "${RUN_START_IST:?Missing RUN_START_IST repository Variable (0-23)}"
-          : "${RUN_END_IST:?Missing RUN_END_IST repository Variable (0-23)}"
-          echo "Run window (IST): ${RUN_START_IST} -> ${RUN_END_IST}"
+          set -euo pipefail
+          missing=()
 
-      # Enforce IST window; skip cleanly if outside
+          test -n "${SHOPIFY_STORE_DOMAIN:-}"       || missing+=("secrets.SHOPIFY_STORE_DOMAIN")
+          test -n "${SHOPIFY_ADMIN_ACCESS_TOKEN:-}" || missing+=("secrets.SHOPIFY_ADMIN_ACCESS_TOKEN")
+          test -n "${SLACK_BOT_TOKEN:-}"            || missing+=("secrets.SLACK_BOT_TOKEN")
+          test -n "${SLACK_CHANNEL_ID:-}"           || missing+=("secrets.SLACK_CHANNEL_ID")
+
+          test -n "${RUN_START_IST:-}"              || missing+=("vars.RUN_START_IST")
+          test -n "${RUN_END_IST:-}"                || missing+=("vars.RUN_END_IST")
+          test -n "${FREQUENCY_MINUTES:-}"          || missing+=("vars.FREQUENCY_MINUTES")
+          test -n "${SHOPIFY_API_VERSION:-}"        || missing+=("vars.SHOPIFY_API_VERSION")
+          test -n "${DRY_RUN:-}"                    || missing+=("vars.DRY_RUN")
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required Secrets/Variables: ${missing[*]}"
+            exit 1
+          fi
+
+      # -------- Gate by IST run window. (Manual runs still proceed.) --------
       - name: Enforce IST run window
+        id: ist_gate
+        shell: bash
         env:
           RUN_START_IST: ${{ vars.RUN_START_IST }}
           RUN_END_IST:   ${{ vars.RUN_END_IST }}
@@ -58,71 +66,68 @@ jobs:
           NOW_HOUR=$(TZ=Asia/Kolkata date +%H)
           SHOULD=0
           if [ "$RUN_START_IST" -le "$RUN_END_IST" ]; then
-            # e.g., 08..23
             if [ "$NOW_HOUR" -ge "$RUN_START_IST" ] && [ "$NOW_HOUR" -lt "$RUN_END_IST" ]; then SHOULD=1; fi
           else
-            # window wraps midnight, e.g., 22..06
             if [ "$NOW_HOUR" -ge "$RUN_START_IST" ] || [ "$NOW_HOUR" -lt "$RUN_END_IST" ]; then SHOULD=1; fi
           fi
-
           echo "Current IST hour=${NOW_HOUR}; should_run=${SHOULD}"
-          if [ "$SHOULD" -ne 1 ]; then
-            echo "Outside IST window; skipping job."
-            exit 0
-          fi
+          echo "should_run=$([ "$SHOULD" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
-      - name: Validate required Secrets/Variables
-        env:
-          SHOPIFY_STORE_DOMAIN:        ${{ secrets.SHOPIFY_STORE_DOMAIN || vars.SHOPIFY_STORE_DOMAIN }}
-          SHOPIFY_ADMIN_ACCESS_TOKEN:  ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN || vars.SHOPIFY_ADMIN_ACCESS_TOKEN }}
-          SLACK_BOT_TOKEN:             ${{ secrets.SLACK_BOT_TOKEN || vars.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID:            ${{ secrets.SLACK_CHANNEL_ID || vars.SLACK_CHANNEL_ID }}
-        run: |
-          set -e
-          : "${SHOPIFY_STORE_DOMAIN:?Missing SHOPIFY_STORE_DOMAIN (secret or var)}"
-          : "${SHOPIFY_ADMIN_ACCESS_TOKEN:?Missing SHOPIFY_ADMIN_ACCESS_TOKEN (secret or var)}"
-          : "${SLACK_BOT_TOKEN:?Missing SLACK_BOT_TOKEN (secret or var)}"
-          : "${SLACK_CHANNEL_ID:?Missing SLACK_CHANNEL_ID (secret or var)}"
-          echo "Core secrets/vars present."
+      - name: Check out repo
+        if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
 
+      - name: Use Node.js 22
+        if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # -------- Write runtime .env from Secrets/Variables (no defaults) --------
       - name: Create runtime .env from GitHub Secrets/Variables
+        if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+        shell: bash
         env:
-          SHOPIFY_STORE_DOMAIN:        ${{ secrets.SHOPIFY_STORE_DOMAIN || vars.SHOPIFY_STORE_DOMAIN }}
-          SHOPIFY_ADMIN_ACCESS_TOKEN:  ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN || vars.SHOPIFY_ADMIN_ACCESS_TOKEN }}
-          SLACK_BOT_TOKEN:             ${{ secrets.SLACK_BOT_TOKEN || vars.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID:            ${{ secrets.SLACK_CHANNEL_ID || vars.SLACK_CHANNEL_ID }}
-          SHOPIFY_API_VERSION:         ${{ vars.SHOPIFY_API_VERSION }}
-          DRY_RUN:                     ${{ vars.DRY_RUN }}
-          SHOPIFY_LOG_GRAPHQL_COSTS:   ${{ vars.SHOPIFY_LOG_GRAPHQL_COSTS }}
+          SHOPIFY_STORE_DOMAIN:      ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_ACCESS_TOKEN:${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          SLACK_BOT_TOKEN:           ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID:          ${{ secrets.SLACK_CHANNEL_ID }}
+          SHOPIFY_API_VERSION:       ${{ vars.SHOPIFY_API_VERSION }}
+          DRY_RUN:                   ${{ vars.DRY_RUN }}
         run: |
-          set -e
+          set -euo pipefail
           cat > .env <<EOF
           SHOPIFY_STORE_DOMAIN=${SHOPIFY_STORE_DOMAIN}
           SHOPIFY_ADMIN_ACCESS_TOKEN=${SHOPIFY_ADMIN_ACCESS_TOKEN}
+          SHOPIFY_API_VERSION=${SHOPIFY_API_VERSION}
           SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
           SLACK_CHANNEL_ID=${SLACK_CHANNEL_ID}
-          SHOPIFY_API_VERSION=${SHOPIFY_API_VERSION}
           DRY_RUN=${DRY_RUN}
-          SHOPIFY_LOG_GRAPHQL_COSTS=${SHOPIFY_LOG_GRAPHQL_COSTS}
           EOF
-          echo ".env created for this run (not committed)."
+          echo "Wrote .env (redacted in logs)."
 
       - name: Install deps (npm ci only)
+        if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
         run: npm ci
 
       - name: Sanity check Shopify credentials (shop.name)
+        if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+        shell: bash
         env:
-          SHOPIFY_STORE_DOMAIN:       ${{ secrets.SHOPIFY_STORE_DOMAIN || vars.SHOPIFY_STORE_DOMAIN }}
-          SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN || vars.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          SHOPIFY_STORE_DOMAIN:       ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
           SHOPIFY_API_VERSION:        ${{ vars.SHOPIFY_API_VERSION }}
         run: |
-          set -e
-          API_VER="${SHOPIFY_API_VERSION:-2025-07}"
-          echo "Pinging https://${SHOPIFY_STORE_DOMAIN}/admin/api/${API_VER}/graphql.json ..."
-          curl -sS -X POST "https://${SHOPIFY_STORE_DOMAIN}/admin/api/${API_VER}/graphql.json" \
-            -H "X-Shopify-Access-Token: ${SHOPIFY_ADMIN_ACCESS_TOKEN}" \
+          set -euo pipefail
+          URL="https://${SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/graphql.json"
+          echo "Pinging ${URL/\/graphql.json/} ..."
+          curl -sS -X POST "$URL" \
             -H "Content-Type: application/json" \
+            -H "X-Shopify-Access-Token: ${SHOPIFY_ADMIN_ACCESS_TOKEN}" \
             --data '{"query":"{ shop { name } }"}' | tee /tmp/ping.json
+          jq -e '.data.shop.name' /tmp/ping.json >/dev/null || { echo "::error::Shopify ping failed"; cat /tmp/ping.json; exit 1; }
 
       - name: Run script
+        if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
         run: node index.js
