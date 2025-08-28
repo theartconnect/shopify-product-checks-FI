@@ -26,7 +26,7 @@ jobs:
         shell: bash
         env:
           SHOPIFY_STORE_DOMAIN:      ${{ secrets.SHOPIFY_STORE_DOMAIN }}
-          SHOPIFY_ADMIN_ACCESS_TOKEN:${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
           SLACK_BOT_TOKEN:           ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID:          ${{ secrets.SLACK_CHANNEL_ID }}
           RUN_START_IST:             ${{ vars.RUN_START_IST }}        # e.g. 8  (08:00 IST)
