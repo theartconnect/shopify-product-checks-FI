@@ -1,9 +1,9 @@
-name: Shopify Product Checks (every 5m + IST run window)
+name: Shopify Product Checks (every 5m + IST window)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes (UTC)
-  workflow_dispatch:        # allow manual runs
+    - cron: "*/5 * * * *"     # every 5 minutes (UTC)
+  workflow_dispatch:          # allow manual runs
 
 permissions:
   contents: read
@@ -18,10 +18,12 @@ jobs:
         shell: bash
         run: |
           echo "event_name=${GITHUB_EVENT_NAME}"
+          echo "ref=${GITHUB_REF}"
+          echo "sha=${GITHUB_SHA}"
           date -u +"UTC time now: %Y-%m-%d %H:%M:%S"
           TZ=Asia/Kolkata date +"IST time now: %Y-%m-%d %H:%M:%S"
 
-      # -------- REQUIRED inputs (no defaults!). Fail immediately if any are missing. --------
+      # ---- REQUIRED inputs (no defaults). Fail immediately if any are missing.
       - name: Validate required Secrets/Variables
         shell: bash
         env:
@@ -31,30 +33,25 @@ jobs:
           SLACK_CHANNEL_ID:           ${{ secrets.SLACK_CHANNEL_ID }}
           RUN_START_IST:              ${{ vars.RUN_START_IST }}        # e.g. 8  (08:00 IST)
           RUN_END_IST:                ${{ vars.RUN_END_IST }}          # e.g. 23 (23:00 IST)
-          FREQUENCY_MINUTES:          ${{ vars.FREQUENCY_MINUTES }}    # e.g. 5 (used only for display if you add a gate)
           SHOPIFY_API_VERSION:        ${{ vars.SHOPIFY_API_VERSION }}  # e.g. 2025-07
           DRY_RUN:                    ${{ vars.DRY_RUN }}              # "true" or "false"
         run: |
           set -euo pipefail
           missing=()
-
-          test -n "${SHOPIFY_STORE_DOMAIN:-}"       || missing+=("secrets.SHOPIFY_STORE_DOMAIN")
-          test -n "${SHOPIFY_ADMIN_ACCESS_TOKEN:-}" || missing+=("secrets.SHOPIFY_ADMIN_ACCESS_TOKEN")
-          test -n "${SLACK_BOT_TOKEN:-}"            || missing+=("secrets.SLACK_BOT_TOKEN")
-          test -n "${SLACK_CHANNEL_ID:-}"           || missing+=("secrets.SLACK_CHANNEL_ID")
-
-          test -n "${RUN_START_IST:-}"              || missing+=("vars.RUN_START_IST")
-          test -n "${RUN_END_IST:-}"                || missing+=("vars.RUN_END_IST")
-          test -n "${FREQUENCY_MINUTES:-}"          || missing+=("vars.FREQUENCY_MINUTES")
-          test -n "${SHOPIFY_API_VERSION:-}"        || missing+=("vars.SHOPIFY_API_VERSION")
-          test -n "${DRY_RUN:-}"                    || missing+=("vars.DRY_RUN")
-
+          test -n "${SHOPIFY_STORE_DOMAIN:-}"        || missing+=("secrets.SHOPIFY_STORE_DOMAIN")
+          test -n "${SHOPIFY_ADMIN_ACCESS_TOKEN:-}"  || missing+=("secrets.SHOPIFY_ADMIN_ACCESS_TOKEN")
+          test -n "${SLACK_BOT_TOKEN:-}"             || missing+=("secrets.SLACK_BOT_TOKEN")
+          test -n "${SLACK_CHANNEL_ID:-}"            || missing+=("secrets.SLACK_CHANNEL_ID")
+          test -n "${RUN_START_IST:-}"               || missing+=("vars.RUN_START_IST")
+          test -n "${RUN_END_IST:-}"                 || missing+=("vars.RUN_END_IST")
+          test -n "${SHOPIFY_API_VERSION:-}"         || missing+=("vars.SHOPIFY_API_VERSION")
+          test -n "${DRY_RUN:-}"                     || missing+=("vars.DRY_RUN")
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::Missing required Secrets/Variables: ${missing[*]}"
             exit 1
           fi
 
-      # -------- Gate by IST run window. (Manual runs still proceed.) --------
+      # ---- IST run window gate (manual runs still proceed).
       - name: Enforce IST run window
         id: ist_gate
         shell: bash
@@ -71,11 +68,7 @@ jobs:
             if [ "$NOW_HOUR" -ge "$RUN_START_IST" ] || [ "$NOW_HOUR" -lt "$RUN_END_IST" ]; then SHOULD=1; fi
           fi
           echo "Current IST hour=${NOW_HOUR}; should_run=${SHOULD}"
-          if [ "$SHOULD" -eq 1 ]; then
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "should_run=$([ "$SHOULD" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Check out repo
         if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
@@ -88,17 +81,19 @@ jobs:
           node-version: 22
           cache: npm
 
-      # -------- Write runtime .env from Secrets/Variables (no defaults) --------
-      - name: Create runtime .env from GitHub Secrets/Variables
+      # ---- Write runtime .env from Secrets/Variables (no defaults)
+      - name: Create runtime .env
         if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
         shell: bash
         env:
-          SHOPIFY_STORE_DOMAIN:       ${{ secrets.SHOPIFY_STORE_DOMAIN }}
-          SHOPIFY_ADMIN_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
-          SLACK_BOT_TOKEN:            ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID:           ${{ secrets.SLACK_CHANNEL_ID }}
-          SHOPIFY_API_VERSION:        ${{ vars.SHOPIFY_API_VERSION }}
-          DRY_RUN:                    ${{ vars.DRY_RUN }}
+          SHOPIFY_STORE_DOMAIN:        ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ADMIN_ACCESS_TOKEN:  ${{ secrets.SHOPIFY_ADMIN_ACCESS_TOKEN }}
+          SLACK_BOT_TOKEN:             ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID:            ${{ secrets.SLACK_CHANNEL_ID }}
+          SHOPIFY_API_VERSION:         ${{ vars.SHOPIFY_API_VERSION }}
+          DRY_RUN:                     ${{ vars.DRY_RUN }}
+          # Optional (set as a Repository Variable to see per-call GQL cost logs from index.js)
+          SHOPIFY_LOG_GRAPHQL_COSTS:   ${{ vars.SHOPIFY_LOG_GRAPHQL_COSTS }}
         run: |
           set -euo pipefail
           cat > .env <<EOF
@@ -108,14 +103,16 @@ jobs:
           SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
           SLACK_CHANNEL_ID=${SLACK_CHANNEL_ID}
           DRY_RUN=${DRY_RUN}
+          SHOPIFY_LOG_GRAPHQL_COSTS=${SHOPIFY_LOG_GRAPHQL_COSTS}
           EOF
-          echo "Wrote .env (redacted in logs)."
+          echo "Wrote .env (values redacted)."
 
-      - name: Install deps (npm ci only)
+      - name: Install dependencies
         if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
         run: npm ci
 
-      - name: Sanity check Shopify credentials (shop.name)
+      # ---- Visible per-run log: ping Shopify before running your script
+      - name: Sanity ping Shopify (shop.name)
         if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
         shell: bash
         env:
@@ -132,6 +129,21 @@ jobs:
             --data '{"query":"{ shop { name } }"}' | tee /tmp/ping.json
           jq -e '.data.shop.name' /tmp/ping.json >/dev/null || { echo "::error::Shopify ping failed"; cat /tmp/ping.json; exit 1; }
 
-      - name: Run script
+      # ---- Run your script and always capture a run.log artifact
+      - name: Run index.js (capture logs)
         if: steps.ist_gate.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
-        run: node index.js
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -v && npm -v
+          # stdbuf makes Node flush line-by-line so you see output live in Actions.
+          stdbuf -oL -eL node index.js | tee run.log
+
+      - name: Upload run.log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-log-${{ github.run_number }}
+          path: run.log
+          if-no-files-found: ignore
+          retention-days: 7
