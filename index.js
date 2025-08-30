@@ -246,7 +246,7 @@ const UPDATE_PRODUCT_STATUS = `
 `;
 
 const SET_METAFIELDS = `
-  mutation SetMetafields($metafields: [MetafieldsSetInput!]!) {
+  mutation SetMetafields($metafields: [MetafieldsSetInput!]!]!) {
     metafieldsSet(metafields: $metafields) {
       metafields { id }
       userErrors { field message }
@@ -1154,7 +1154,6 @@ async function run() {
                 }
               }
             } else {
-              // Status already true/false → no main-only send
               successParts.push(`\n- main_item_confirmation_status already set (${myMainStatus}); main-only send skipped.`);
             }
 
@@ -1217,42 +1216,27 @@ async function run() {
               if (m) { tax_percentage = m[1]; tax_id = (m[2] || '').trim(); }
             }
 
-            // Send SKU payloads per group with main-item inclusion rules
+            // Send SKU payloads per group — ALWAYS include main item first if identified
             let allSkuGroupsOK = true;
 
             for (const [gkey, g] of skuGroups.entries()) {
               const items = [];
 
-              // Decide whether to include main item at the head
-              let includeMainItem = false;
+              // If there is an identified main item for this group, always include it first
               if (g.mainNode && g.mainNode.product && g.mainNode.product.id) {
                 const mainProdId = g.mainNode.product.id;
-                let mainStatus = null;
                 if (!IS_DRY_RUN) {
-                  try { mainStatus = await getMainItemConfirmationStatus(mainProdId); }
-                  catch { mainStatus = null; }
-                } else {
-                  // In DRY RUN, simulate "null" to show behavior
-                  mainStatus = parseBooleanFromMetafield({ value: 'null' }) || null;
-                }
-
-                if (mainStatus === null) {
-                  includeMainItem = true;          // include at head
-                  if (!IS_DRY_RUN) {
-                    try {
+                  try {
+                    const mainStatus = await getMainItemConfirmationStatus(mainProdId);
+                    if (mainStatus === null) {
                       await setMainItemConfirmationStatus(mainProdId, false);
                       successParts.push(`\n- Set main_item_confirmation_status = false on main item (product ${mainProdId}) prior to composite send.`);
-                    } catch {
-                      failureParts.push(`\n- Failed to set main_item_confirmation_status = false on main item (product ${mainProdId}).`);
                     }
+                  } catch {
+                    failureParts.push(`\n- Failed to read/set main_item_confirmation_status on main item (product ${mainProdId}).`);
                   }
-                } else {
-                  // true or false → remove (do not include)
-                  includeMainItem = false;
                 }
-              }
 
-              if (g.mainNode && includeMainItem) {
                 const node = g.mainNode;
                 const productNode = node.product || {};
                 const productTitle = String(productNode?.title || p.title || '').trim();
@@ -1281,6 +1265,7 @@ async function run() {
                 });
               }
 
+              // Then add composite product's variants (skipping duplication of the main)
               for (const entry of g.items) {
                 const v = entry.variant;
                 if (!v.sku) continue;
@@ -1333,7 +1318,7 @@ async function run() {
               };
 
               if (IS_DRY_RUN) {
-                successParts.push(`\n- Would send Zoho item confirmation for group '${gkey}' (main_item_only=false) with ${count} items.`);
+                successParts.push(`\n- Would send Zoho item confirmation for group '${gkey}' (main_item_only=false) with ${count} items (main first if present).`);
               } else {
                 const r = await callSkuArrayWebhook(payload);
                 if (!r.ok) {
@@ -1351,7 +1336,6 @@ async function run() {
                 failureParts.push('\n- One or more Zoho item confirmation calls failed.');
               }
             } else {
-              // DRY RUN: do not mutate product_changes
               successParts.push('\n- New SKU webhook not sent (DRY RUN).');
             }
 
