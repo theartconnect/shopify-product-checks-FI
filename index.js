@@ -246,7 +246,7 @@ const UPDATE_PRODUCT_STATUS = `
 `;
 
 const SET_METAFIELDS = `
-  mutation SetMetafields($metafields: [MetafieldsSetInput!]!]!) {
+  mutation SetMetafields($metafields: [MetafieldsSetInput!]!) {
     metafieldsSet(metafields: $metafields) {
       metafields { id }
       userErrors { field message }
