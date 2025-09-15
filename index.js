@@ -1230,7 +1230,6 @@ async function run() {
                     const mainStatus = await getMainItemConfirmationStatus(mainProdId);
                     if (mainStatus === null) {
                       await setMainItemConfirmationStatus(mainProdId, false);
-                      successParts.push(`\n- Set main_item_confirmation_status = false on main item (product ${mainProdId}) prior to composite send.`);
                     }
                   } catch {
                     failureParts.push(`\n- Failed to read/set main_item_confirmation_status on main item (product ${mainProdId}).`);
