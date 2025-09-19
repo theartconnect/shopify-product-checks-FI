@@ -766,6 +766,20 @@ async function setMainItemConfirmationStatus(productId, value /* boolean */) {
 }
 
 /* =========================
+   NEW: HSN helpers
+========================= */
+function getUniqueHsnFromVariants(variants = []) {
+  const hsSet = new Set();
+  for (const v of variants) {
+    const hs = v?.inventoryItem?.harmonizedSystemCode
+      ? String(v.inventoryItem.harmonizedSystemCode).trim()
+      : '';
+    if (hs) hsSet.add(hs);
+  }
+  return hsSet.size === 1 ? [...hsSet][0] : null;
+}
+
+/* =========================
    Webhook callers
 ========================= */
 async function callMakeWebhook(payload) {
@@ -939,6 +953,9 @@ async function run() {
         ));
 
         const allVariants = await getAllVariants(p.id, p.variants);
+
+        // NEW: product-level HSN (only if unique across variants)
+        const productHsn = getUniqueHsnFromVariants(allVariants);
 
         // Main-item classification (all patterned SKUs are -0)
         let foundPattern = false;
@@ -1115,6 +1132,10 @@ async function run() {
               }
 
               const itemSku = String(mainVariant?.sku || '').trim();
+              // Prefer the main variant's HS code; fall back to product-level unique HSN
+              const mainVariantHsn = (mainVariant?.inventoryItem?.harmonizedSystemCode || '').trim();
+              const hsn_value = mainVariantHsn || productHsn || null;
+
               const item = {
                 sku: itemSku,
                 is_main_item: true,
@@ -1130,6 +1151,7 @@ async function run() {
                 product_id: p.id,
                 tax_percentage,
                 tax_id,
+                hsn_value,
                 items: [item],
                 count: 1,
                 skus: [itemSku],
@@ -1309,6 +1331,7 @@ async function run() {
                 product_id: p.id,
                 tax_percentage,
                 tax_id,
+                hsn_value: productHsn, // unique product-level HSN if resolvable
                 items,
                 count,
                 skus,
