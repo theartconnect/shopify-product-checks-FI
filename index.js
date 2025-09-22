@@ -817,6 +817,23 @@ async function callSkuArrayWebhook(payloadObject) {
 }
 
 /* =========================
+   TAX ID mapping (percentage -> Zoho tax id)
+========================= */
+function taxIdForPercentStr(percentStr) {
+  const n = Number(percentStr);
+  if (!isFinite(n)) return '';
+  const key = n.toFixed(2); // normalize (e.g., "5" -> "5.00", "0.25" -> "0.25")
+  const map = {
+    '0.00':  '514287000000012267',
+    '0.25':  '514287000014475600',
+    '5.00':  '514287000000074409',
+    '12.00': '514287000000074605',
+    '18.00': '514287000000074413',
+  };
+  return map[key] || '';
+}
+
+/* =========================
    Runner
 ========================= */
 async function run() {
@@ -902,8 +919,11 @@ async function run() {
           const taxRaw5 = parseStringFromMetafield(p.metafieldTax);
           let tax_percentage = '', tax_id = '';
           if (taxRaw5) {
-            const m = taxRaw5.match(/^([0-9]+(?:\.[0-9]+)?)%(.*)$/);
-            if (m) { tax_percentage = m[1]; tax_id = (m[2] || '').trim(); }
+            const m = taxRaw5.match(/^([0-9]+(?:\.[0-9]+)?)%/);
+            if (m) {
+              tax_percentage = m[1];
+              tax_id = taxIdForPercentStr(tax_percentage); // <-- mapped from percent
+            }
           }
           const r = IS_DRY_RUN ? { ok: true, status: 200 } : await callMakeWebhook({ store: 'FI', tax_modified: true, tax_percentage, tax_id, product_id: p.id });
           if (r.ok) {
@@ -1127,8 +1147,11 @@ async function run() {
               const taxRaw = parseStringFromMetafield(p.metafieldTax);
               let tax_percentage = '', tax_id = '';
               if (taxRaw) {
-                const m = taxRaw.match(/^([0-9]+(?:\.[0-9]+)?)%(.*)$/);
-                if (m) { tax_percentage = m[1]; tax_id = (m[2] || '').trim(); }
+                const m = taxRaw.match(/^([0-9]+(?:\.[0-9]+)?)%/);
+                if (m) {
+                  tax_percentage = m[1];
+                  tax_id = taxIdForPercentStr(tax_percentage); // <-- mapped from percent
+                }
               }
 
               const itemSku = String(mainVariant?.sku || '').trim();
@@ -1234,8 +1257,11 @@ async function run() {
             const taxRaw = parseStringFromMetafield(p.metafieldTax);
             let tax_percentage = '', tax_id = '';
             if (taxRaw) {
-              const m = taxRaw.match(/^([0-9]+(?:\.[0-9]+)?)%(.*)$/);
-              if (m) { tax_percentage = m[1]; tax_id = (m[2] || '').trim(); }
+              const m = taxRaw.match(/^([0-9]+(?:\.[0-9]+)?)%/);
+              if (m) {
+                tax_percentage = m[1];
+                tax_id = taxIdForPercentStr(tax_percentage); // <-- mapped from percent
+              }
             }
 
             // Send SKU payloads per group — ALWAYS include main item first if identified
