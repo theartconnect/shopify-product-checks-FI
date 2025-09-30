@@ -116,7 +116,7 @@ const PRODUCTS_PAGE_QUERY = `
         status
         vendor
         descriptionHtml
-        images(first: 1) { edges { node { id } } }
+        images(first: 250) { edges { node { id altText } } }
         collections(first: 100) {
           pageInfo { hasNextPage endCursor }
           nodes { title handle }
@@ -327,6 +327,16 @@ const PUBLISHABLE_PUBLISH = `
   }
 `;
 
+/* NEW: Update product image alt text */
+const PRODUCT_IMAGE_UPDATE = `
+  mutation ProductImageUpdate($productId: ID!, $imageId: ID!, $altText: String) {
+    productImageUpdate(productId: $productId, image: { id: $imageId, altText: $altText }) {
+      image { id altText }
+      userErrors { field message }
+    }
+  }
+`;
+
 /* =========================
    Helpers
 ========================= */
@@ -404,6 +414,23 @@ async function getAllCollections(productId, initial) {
     cursor = page.pageInfo.endCursor;
   }
   return nodes;
+}
+
+/* NEW: images helper (simple because we already fetched up to 250 images) */
+async function getAllImages(productId, initial) {
+  const nodes = [...(initial?.edges?.map(e => e.node) || [])];
+  return nodes;
+}
+
+/* NEW: update image alt text */
+async function updateProductImageAlt(productId, imageId, altText) {
+  const data = await shopifyGraphQL(PRODUCT_IMAGE_UPDATE, {
+    productId,
+    imageId,
+    altText
+  });
+  const errs = data?.productImageUpdate?.userErrors || [];
+  if (errs.length) throw new Error(`productImageUpdate: ${JSON.stringify(errs)}`);
 }
 
 async function setProductStatusActive(productId) {
@@ -967,6 +994,36 @@ async function run() {
         const hasImage = (p.images && p.images.edges && p.images.edges.length > 0);
         const isImageEmpty = !hasImage;
 
+        /* NEW: if images exist, set each image altText to the product title */
+        if (hasImage) {
+          try {
+            const imgs = await getAllImages(p.id, p.images);
+            const desiredAlt = String(p.title || '').trim();
+            let changed = 0;
+
+            for (const img of imgs) {
+              const needsUpdate = (img.altText || '') !== desiredAlt;
+              if (!needsUpdate) continue;
+
+              if (IS_DRY_RUN) {
+                changed += 1;
+              } else {
+                await updateProductImageAlt(p.id, img.id, desiredAlt);
+                changed += 1;
+              }
+            }
+
+            if (changed > 0) {
+              successParts.push(`\n- ${IS_DRY_RUN ? 'Would set' : 'Set'} alt text on ${changed} image(s) to product name.`);
+            } else {
+              successParts.push('\n- Image alt text already matches product name.');
+            }
+          } catch (e) {
+            failureParts.push('\n- Failed to update image alt text for one or more images.');
+            console.warn('Alt text update error:', e?.response?.data || e.message || e);
+          }
+        }
+
         const allCollections = await getAllCollections(p.id, p.collections);
         const isCollectionAssigned = !!(percentStr && allCollections.some(c =>
           c.title && /shopify/i.test(c.title) && new RegExp(`Tax Rate\\s+${percentStr}%`, 'i').test(c.title)
@@ -1011,9 +1068,10 @@ async function run() {
           linkCheckFailed = !anyLinked;
         }
 
-        // Cosmetic supplies: only if title contains "cosmetic" (non-blocking)
+        // Cosmetic supplies: title has "cosmetic" AND vendor is "Formulators Inc"
         const titleHasCosmetic = /\bcosmetic\b/i.test(p.title || '');
-        if (titleHasCosmetic) {
+        const vendorIsFormulatorsInc = String(p.vendor || '').trim().toLowerCase() === 'formulators inc';
+        if (titleHasCosmetic && vendorIsFormulatorsInc) {
           const refs = p.metafieldCosmetics?.references?.nodes || [];
           if (refs.length === 0) {
             const res = await ensureAddedToCollectionByHandle(p.id, COSMETIC_COLLECTION_HANDLE);
@@ -1379,7 +1437,8 @@ async function run() {
             if (!IS_DRY_RUN) {
               if (allSkuGroupsOK) {
                 successParts.push('\n- Data sent for Zoho item confirmation.');
-                await removeNPCLabel();
+                const newList = productChanges.filter(v => v !== LABEL_NEW_PRODUCT_CHECKS);
+                await setProductChangesList(p.id, JSON.stringify(newList));
               } else {
                 failureParts.push('\n- One or more Zoho item confirmation calls failed.');
               }
