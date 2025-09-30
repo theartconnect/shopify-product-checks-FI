@@ -117,6 +117,16 @@ const PRODUCTS_PAGE_QUERY = `
         vendor
         descriptionHtml
         images(first: 250) { edges { node { id altText } } }
+        media(first: 250) {
+          nodes {
+            __typename
+            ... on MediaImage {
+              id
+              alt
+              image { id }
+            }
+          }
+        }
         collections(first: 100) {
           pageInfo { hasNextPage endCursor }
           nodes { title handle }
@@ -327,12 +337,12 @@ const PUBLISHABLE_PUBLISH = `
   }
 `;
 
-/* NEW: Update product image alt text */
-const PRODUCT_IMAGE_UPDATE = `
-  mutation ProductImageUpdate($productId: ID!, $imageId: ID!, $altText: String) {
-    productImageUpdate(productId: $productId, image: { id: $imageId, altText: $altText }) {
-      image { id altText }
-      userErrors { field message }
+/* NEW: Update product image alt text via MediaImage */
+const PRODUCT_UPDATE_MEDIA = `
+  mutation UpdateMediaAlts($productId: ID!, $media: [UpdateMediaInput!]!) {
+    productUpdateMedia(productId: $productId, media: $media) {
+      media { id alt }
+      mediaUserErrors { field message }
     }
   }
 `;
@@ -416,21 +426,19 @@ async function getAllCollections(productId, initial) {
   return nodes;
 }
 
-/* NEW: images helper (simple because we already fetched up to 250 images) */
-async function getAllImages(productId, initial) {
-  const nodes = [...(initial?.edges?.map(e => e.node) || [])];
-  return nodes;
+/* NEW: media helpers */
+function getAllMediaImages(productNode) {
+  const nodes = (productNode?.media?.nodes || []).filter(m => m.__typename === 'MediaImage');
+  return nodes; // each has { id, alt, image { id } }
 }
 
-/* NEW: update image alt text */
-async function updateProductImageAlt(productId, imageId, altText) {
-  const data = await shopifyGraphQL(PRODUCT_IMAGE_UPDATE, {
+async function updateProductImageAltsBatch(productId, updates /* array of {id, alt} */) {
+  const data = await shopifyGraphQL(PRODUCT_UPDATE_MEDIA, {
     productId,
-    imageId,
-    altText
+    media: updates
   });
-  const errs = data?.productImageUpdate?.userErrors || [];
-  if (errs.length) throw new Error(`productImageUpdate: ${JSON.stringify(errs)}`);
+  const errs = data?.productUpdateMedia?.mediaUserErrors || [];
+  if (errs.length) throw new Error(`productUpdateMedia: ${JSON.stringify(errs)}`);
 }
 
 async function setProductStatusActive(productId) {
@@ -994,29 +1002,26 @@ async function run() {
         const hasImage = (p.images && p.images.edges && p.images.edges.length > 0);
         const isImageEmpty = !hasImage;
 
-        /* NEW: if images exist, set each image altText to the product title */
+        /* NEW: if images exist, set each MediaImage alt to the product title */
         if (hasImage) {
           try {
-            const imgs = await getAllImages(p.id, p.images);
+            const mediaImages = getAllMediaImages(p);
             const desiredAlt = String(p.title || '').trim();
-            let changed = 0;
 
-            for (const img of imgs) {
-              const needsUpdate = (img.altText || '') !== desiredAlt;
-              if (!needsUpdate) continue;
-
-              if (IS_DRY_RUN) {
-                changed += 1;
-              } else {
-                await updateProductImageAlt(p.id, img.id, desiredAlt);
-                changed += 1;
+            const updates = [];
+            for (const mi of mediaImages) {
+              if ((mi.alt || '') !== desiredAlt) {
+                updates.push({ id: mi.id, alt: desiredAlt });
               }
             }
 
-            if (changed > 0) {
-              successParts.push(`\n- ${IS_DRY_RUN ? 'Would set' : 'Set'} alt text on ${changed} image(s) to product name.`);
-            } else {
+            if (updates.length === 0) {
               successParts.push('\n- Image alt text already matches product name.');
+            } else if (IS_DRY_RUN) {
+              successParts.push(`\n- Would set alt text on ${updates.length} image(s) to product name.`);
+            } else {
+              await updateProductImageAltsBatch(p.id, updates);
+              successParts.push(`\n- Set alt text on ${updates.length} image(s) to product name.`);
             }
           } catch (e) {
             failureParts.push('\n- Failed to update image alt text for one or more images.');
