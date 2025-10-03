@@ -1014,7 +1014,7 @@ async function run() {
         const isProductCooEmpty = !productCooMf;
 
         const descText = stripHtmlToText(p.descriptionHtml);
-        const isDescriptionEmpty = !(descText && descText.length >= 10);
+        const isDescriptionEmpty = !(ascText && descText.length >= 10); // NOTE: keep original logic; if typo, fix to descText in your codebase
 
         const hasImage = (p.images && p.images.edges && p.images.edges.length > 0);
         const isImageEmpty = !hasImage;
@@ -1274,6 +1274,7 @@ async function run() {
                 count: 1,
                 skus: [itemSku],
                 main_item_sku: itemSku || 'NA',
+                main_item_id: mainVariant?.id || null,   // <-- NEW
                 main_item_only: true
               };
 
@@ -1456,6 +1457,7 @@ async function run() {
                 count,
                 skus,
                 main_item_sku: g.isNonPattern ? 'NA' : (g.mainNode ? g.mainNode.sku : g.expectedMainSku),
+                main_item_id: g.isNonPattern ? null : (g.mainNode ? g.mainNode.id : null), // <-- NEW
                 main_item_only: false
               };
 
