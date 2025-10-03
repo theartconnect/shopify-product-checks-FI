@@ -1014,7 +1014,7 @@ async function run() {
         const isProductCooEmpty = !productCooMf;
 
         const descText = stripHtmlToText(p.descriptionHtml);
-        const isDescriptionEmpty = !(ascText && descText.length >= 10); // NOTE: keep original logic; if typo, fix to descText in your codebase
+        const isDescriptionEmpty = !(descText && descText.length >= 10); // FIXED: ascText -> descText
 
         const hasImage = (p.images && p.images.edges && p.images.edges.length > 0);
         const isImageEmpty = !hasImage;
@@ -1092,7 +1092,8 @@ async function run() {
 
         // Cosmetic supplies: title has "cosmetic" AND vendor is "Formulators Inc"
         const titleHasCosmetic = /\bcosmetic\b/i.test(p.title || '');
-        const vendorIsFormulatorsInc = String(p.vendor || '').trim().toLowerCase() === 'formulators inc';
+        theVendorIsFormulatorsInc = String(p.vendor || '').trim().toLowerCase() === 'formulators inc';
+        const vendorIsFormulatorsInc = theVendorIsFormulatorsInc; // keep original style
         if (titleHasCosmetic && vendorIsFormulatorsInc) {
           const refs = p.metafieldCosmetics?.references?.nodes || [];
           if (refs.length === 0) {
@@ -1274,7 +1275,7 @@ async function run() {
                 count: 1,
                 skus: [itemSku],
                 main_item_sku: itemSku || 'NA',
-                main_item_id: mainVariant?.id || null,   // <-- NEW
+                main_item_id: p.id,              // CHANGED: product GID (not variant)
                 main_item_only: true
               };
 
@@ -1457,7 +1458,7 @@ async function run() {
                 count,
                 skus,
                 main_item_sku: g.isNonPattern ? 'NA' : (g.mainNode ? g.mainNode.sku : g.expectedMainSku),
-                main_item_id: g.isNonPattern ? null : (g.mainNode ? g.mainNode.id : null), // <-- NEW
+                main_item_id: g.isNonPattern ? null : (g.mainNode ? (g.mainNode.product?.id || null) : null), // CHANGED: product GID
                 main_item_only: false
               };
 
