@@ -113,6 +113,7 @@ const PRODUCTS_PAGE_QUERY = `
       nodes {
         id
         title
+        handle
         status
         vendor
         descriptionHtml
@@ -903,7 +904,29 @@ async function run() {
       if (!productChanges.length) continue;
       matchedAny++;
 
-      // Publish to India market publication on scan
+      const header = `FI Store - Product "${p.title}"`;
+
+      // --- NEW: hard block if title or handle contains "copy"
+      const titleHasCopy = String(p.title || '').toLowerCase().includes('copy');
+      const handleHasCopy = String(p.handle || '').toLowerCase().includes('copy');
+      if (titleHasCopy || handleHasCopy) {
+        const reasonBits = [];
+        if (titleHasCopy) reasonBits.push('title');
+        if (handleHasCopy) reasonBits.push('url/handle');
+        const reasonStr = reasonBits.join(' & ');
+
+        // Set product to DRAFT and skip all sends
+        if (!IS_DRY_RUN) {
+          try { await setProductStatusDraft(p.id); }
+          catch (e) { console.warn('Failed to set product to DRAFT for copy-block:', e?.response?.data || e.message || e); }
+        }
+
+        await slackPostFailure(`${header} \n- New Product Checks blocked: found "copy" in ${reasonStr}. Product set to DRAFT and all webhooks/publishing skipped.`);
+        failed++;
+        continue; // skip everything else for this product
+      }
+
+      // Publish to India market publication on scan (moved after copy-block)
       await ensureProductInIndiaCatalog(p.id);
 
       // Success/Failure message buckets for this product
@@ -998,9 +1021,6 @@ async function run() {
 
       if (!hasNewProductChecks && successParts.length === 0 && failureParts.length === 0) continue;
 
-      // Base Slack header
-      const header = `FI Store - Product "${p.title}"`;
-
       if (hasNewProductChecks) {
         // ---- New Product Checks
         const indianTaxRateRaw = parseStringFromMetafield(p.metafieldTax);
@@ -1019,7 +1039,7 @@ async function run() {
         const hasImage = (p.images && p.images.edges && p.images.edges.length > 0);
         const isImageEmpty = !hasImage;
 
-        /* NEW: if images exist, set each MediaImage alt to the product title */
+        /* Keep alt text updates BUT remove all related Slack messages */
         if (hasImage) {
           try {
             const mediaImages = getAllMediaImages(p);
@@ -1032,16 +1052,12 @@ async function run() {
               }
             }
 
-            if (updates.length === 0) {
-              successParts.push('\n- Image alt text already matches product name.');
-            } else if (IS_DRY_RUN) {
-              successParts.push(`\n- Would set alt text on ${updates.length} image(s) to product name.`);
-            } else {
+            if (!IS_DRY_RUN && updates.length > 0) {
               await updateProductImageAltsBatch(p.id, updates);
-              successParts.push(`\n- Set alt text on ${updates.length} image(s) to product name.`);
             }
+            // (No Slack messages about alt updates)
           } catch (e) {
-            failureParts.push('\n- Failed to update image alt text for one or more images.');
+            // (No Slack messages about alt failures)
             console.warn('Alt text update error:', e?.response?.data || e.message || e);
           }
         }
@@ -1274,7 +1290,7 @@ async function run() {
                 items: [item],
                 count: 1,
                 skus: [itemSku],
-                main_item_sku: itemSku || 'NA',
+                main_item_sku: itemSku,
                 main_item_id: p.id,              // CHANGED: product GID (not variant)
                 main_item_only: true
               };
