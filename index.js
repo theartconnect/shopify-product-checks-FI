@@ -52,6 +52,7 @@ async function shopifyGraphQL(query, variables = {}) {
           headers: {
             'X-Shopify-Access-Token': SHOPIFY_ADMIN_ACCESS_TOKEN,
             'Content-Type': 'application/json',
+            'Accept': 'application/json',
           },
           timeout: 60000,
         }
@@ -906,7 +907,7 @@ async function run() {
 
       const header = `FI Store - Product "${p.title}"`;
 
-      // --- NEW: hard block if title or handle contains "copy"
+      // --- Hard block: title or handle contains "copy"
       const titleHasCopy = String(p.title || '').toLowerCase().includes('copy');
       const handleHasCopy = String(p.handle || '').toLowerCase().includes('copy');
       if (titleHasCopy || handleHasCopy) {
@@ -915,10 +916,10 @@ async function run() {
         if (handleHasCopy) reasonBits.push('url/handle');
         const reasonStr = reasonBits.join(' & ');
 
-        // Set product to DRAFT and skip all sends
         if (!IS_DRY_RUN) {
           try { await setProductStatusDraft(p.id); }
-          catch (e) { console.warn('Failed to set product to DRAFT for copy-block:', e?.response?.data || e.message || e); }
+          catch (e) { console.warn('Failed to set product to DRAFT for copy-block:', e?.response?.data || e.message || e);
+          }
         }
 
         await slackPostFailure(`${header} \n- New Product Checks blocked: found "copy" in ${reasonStr}. Product set to DRAFT and all webhooks/publishing skipped.`);
@@ -926,7 +927,7 @@ async function run() {
         continue; // skip everything else for this product
       }
 
-      // Publish to India market publication on scan (moved after copy-block)
+      // Publish to India market publication on scan (after copy-block)
       await ensureProductInIndiaCatalog(p.id);
 
       // Success/Failure message buckets for this product
@@ -1034,30 +1035,24 @@ async function run() {
         const isProductCooEmpty = !productCooMf;
 
         const descText = stripHtmlToText(p.descriptionHtml);
-        const isDescriptionEmpty = !(descText && descText.length >= 10); // FIXED: ascText -> descText
+        const isDescriptionEmpty = !(descText && descText.length >= 10);
 
         const hasImage = (p.images && p.images.edges && p.images.edges.length > 0);
         const isImageEmpty = !hasImage;
 
-        /* Keep alt text updates BUT remove all related Slack messages */
+        /* Update alt text silently (no Slack messages about alt updates) */
         if (hasImage) {
           try {
             const mediaImages = getAllMediaImages(p);
             const desiredAlt = String(p.title || '').trim();
-
             const updates = [];
             for (const mi of mediaImages) {
-              if ((mi.alt || '') !== desiredAlt) {
-                updates.push({ id: mi.id, alt: desiredAlt });
-              }
+              if ((mi.alt || '') !== desiredAlt) updates.push({ id: mi.id, alt: desiredAlt });
             }
-
             if (!IS_DRY_RUN && updates.length > 0) {
               await updateProductImageAltsBatch(p.id, updates);
             }
-            // (No Slack messages about alt updates)
           } catch (e) {
-            // (No Slack messages about alt failures)
             console.warn('Alt text update error:', e?.response?.data || e.message || e);
           }
         }
@@ -1069,10 +1064,9 @@ async function run() {
 
         const allVariants = await getAllVariants(p.id, p.variants);
 
-        // NEW: product-level HSN (only if unique across variants)
         const productHsn = getUniqueHsnFromVariants(allVariants);
 
-        // Main-item classification (all patterned SKUs are -0)
+        // Pattern/main detection
         let foundPattern = false;
         let allZeroDigits = true;
         const groupMeta = new Map();
@@ -1087,7 +1081,7 @@ async function run() {
         }
         const productIsMainItem = foundPattern && allZeroDigits;
 
-        // Linked-metafield check (at least one unit-bearing option linked to custom.variant_quantities)
+        // Linked-metafield check
         let linkCheckFailed = false;
         const namesWithUnits = new Set();
         for (const v of allVariants) {
@@ -1106,10 +1100,10 @@ async function run() {
           linkCheckFailed = !anyLinked;
         }
 
-        // Cosmetic supplies: title has "cosmetic" AND vendor is "Formulators Inc"
+        // Cosmetic supplies helper (non-fatal)
         const titleHasCosmetic = /\bcosmetic\b/i.test(p.title || '');
         theVendorIsFormulatorsInc = String(p.vendor || '').trim().toLowerCase() === 'formulators inc';
-        const vendorIsFormulatorsInc = theVendorIsFormulatorsInc; // keep original style
+        const vendorIsFormulatorsInc = theVendorIsFormulatorsInc;
         if (titleHasCosmetic && vendorIsFormulatorsInc) {
           const refs = p.metafieldCosmetics?.references?.nodes || [];
           if (refs.length === 0) {
@@ -1122,12 +1116,11 @@ async function run() {
         const invIds = (allVariants || []).map(v => v.inventoryItem?.id).filter(Boolean);
         await setOnHandZeroForItems(invIds);
 
-        // Per-variant validations + tax parity + SKU grouping
+        // Variant-level validations and grouping
         const variantIssueRows = [];
         const duplicateSkus = new Set();
         let taxMismatchWithMain = false;
 
-        /* Build SKU groups. Robust main detection */
         const skuGroups = new Map(); // key: 'NONPATTERN' or base+tail
         const missingMainGroups = [];
 
@@ -1155,12 +1148,10 @@ async function run() {
             }
             const g = skuGroups.get(gkey);
 
-            // If THIS variant is the -0, synthesize a mainNode from self
             if (parts.digits === 0 && !g.mainNode) {
               g.mainNode = buildMainNodeFromSelf(v, p);
               mainExists = 'Yes';
             } else {
-              // Otherwise check existence storewide
               const exists = await skuExistsCaseInsensitive(parts.candidate);
               mainExists = exists ? 'Yes' : 'No';
               if (exists && !g.mainNode) {
@@ -1171,7 +1162,6 @@ async function run() {
 
             g.items.push({ variant: v, label });
 
-            // Tax parity check using fetched/synth main node
             if (!g._taxChecked && g.mainNode?.product?.id) {
               try {
                 const mainTax = await getProductTax(g.mainNode.product.id);
@@ -1189,7 +1179,6 @@ async function run() {
             skuGroups.get(gkey).items.push({ variant: v, label });
           }
 
-          // Collect variant issues table
           let hasIssue = false;
           const skuCell = sku ? sku : 'Fill in';
           const hsCell = hs ? hs : 'Fill in';
@@ -1224,7 +1213,6 @@ async function run() {
           !duplicateSkus.size;
 
         if (passesAll) {
-          // Remove the New Product Checks label on success after side-effects succeed (below).
           const removeNPCLabel = async () => {
             if (!IS_DRY_RUN) {
               const newList = productChanges.filter(v => v !== LABEL_NEW_PRODUCT_CHECKS);
@@ -1233,10 +1221,8 @@ async function run() {
           };
 
           if (productIsMainItem) {
-            // --- MAIN ITEM path: main-only SKU webhook if status is strictly null
             const myMainStatus = parseBooleanFromMetafield(p.metafieldMainItemConfirm); // null | true | false
             if (myMainStatus === null) {
-              // Build a single-item payload for the main item
               const mainVariant =
                 allVariants.find(v => {
                   const parts = expectedMainSkuParts(v.sku || '');
@@ -1262,12 +1248,11 @@ async function run() {
                 const m = taxRaw.match(/^([0-9]+(?:\.[0-9]+)?)%/);
                 if (m) {
                   tax_percentage = m[1];
-                  tax_id = taxIdForPercentStr(tax_percentage); // <-- mapped from percent
+                  tax_id = taxIdForPercentStr(tax_percentage);
                 }
               }
 
               const itemSku = String(mainVariant?.sku || '').trim();
-              // Prefer the main variant's HS code; fall back to product-level unique HSN
               const mainVariantHsn = (mainVariant?.inventoryItem?.harmonizedSystemCode || '').trim();
               const hsn_value = mainVariantHsn || productHsn || null;
 
@@ -1290,8 +1275,8 @@ async function run() {
                 items: [item],
                 count: 1,
                 skus: [itemSku],
-                main_item_sku: itemSku,
-                main_item_id: p.id,              // CHANGED: product GID (not variant)
+                main_item_sku: itemSku || 'NA',
+                main_item_id: p.id,
                 main_item_only: true
               };
 
@@ -1315,7 +1300,6 @@ async function run() {
               successParts.push(`\n- main_item_confirmation_status already set (${myMainStatus}); main-only send skipped.`);
             }
 
-            // Status handling & publish
             const prevStatus = p.status;
             if (!IS_DRY_RUN && prevStatus === 'DRAFT') {
               await setProductStatusActive(p.id);
@@ -1332,7 +1316,6 @@ async function run() {
             await removeNPCLabel();
             passed++;
           } else {
-            // --- COMPOSITE path
             const prevStatus = p.status;
             if (!IS_DRY_RUN && prevStatus === 'DRAFT') {
               await setProductStatusActive(p.id);
@@ -1350,7 +1333,6 @@ async function run() {
               o => o?.linkedMetafield?.namespace === 'custom' && o?.linkedMetafield?.key === 'variant_quantities'
             );
 
-            // Unit Price webhook (composite only)
             if (!IS_DRY_RUN) {
               if (anyOptionLinkedToVQ) {
                 const up = await callUnitPriceWebhook(p.id);
@@ -1366,24 +1348,20 @@ async function run() {
               successParts.push('\n- Unit Price Update not sent (DRY RUN).');
             }
 
-            // Tax breakdown for payloads
             const taxRaw = parseStringFromMetafield(p.metafieldTax);
             let tax_percentage = '', tax_id = '';
             if (taxRaw) {
               const m = taxRaw.match(/^([0-9]+(?:\.[0-9]+)?)%/);
               if (m) {
                 tax_percentage = m[1];
-                tax_id = taxIdForPercentStr(tax_percentage); // <-- mapped from percent
+                tax_id = taxIdForPercentStr(tax_percentage);
               }
             }
 
-            // Send SKU payloads per group — ALWAYS include main item first if identified.
             let allSkuGroupsOK = true;
-
             for (const [gkey, g] of skuGroups.entries()) {
               const items = [];
 
-              // 1) If there is an identified main item for this group, include it first.
               if (g.mainNode && g.mainNode.product && g.mainNode.product.id) {
                 const node = g.mainNode;
                 const productNode = node.product || {};
@@ -1413,7 +1391,6 @@ async function run() {
                 });
               }
 
-              // 2) Add composite product's variants (if main belongs to this product, avoid duplicating).
               for (const entry of g.items) {
                 const v = entry.variant;
                 if (!v.sku) continue;
@@ -1421,9 +1398,7 @@ async function run() {
                 const partsV = expectedMainSkuParts(v.sku || '');
                 const isThisVariantMain = !!(partsV && partsV.digits === 0);
 
-                // Avoid duplicating a main variant that equals the g.mainNode
                 if (g.mainNode && g.mainNode.product && g.mainNode.product.id === p.id && isThisVariantMain) {
-                  // already included as main item above
                   continue;
                 }
 
@@ -1453,7 +1428,6 @@ async function run() {
                 });
               }
 
-              // 3) Safety: ensure exactly one main in items for patterned groups
               if (!g.isNonPattern) {
                 const anyMain = items.some(it => it.is_main_item === true);
                 if (!anyMain) {
@@ -1474,7 +1448,7 @@ async function run() {
                 count,
                 skus,
                 main_item_sku: g.isNonPattern ? 'NA' : (g.mainNode ? g.mainNode.sku : g.expectedMainSku),
-                main_item_id: g.isNonPattern ? null : (g.mainNode ? (g.mainNode.product?.id || null) : null), // CHANGED: product GID
+                main_item_id: g.isNonPattern ? null : (g.mainNode ? (g.mainNode.product?.id || null) : null),
                 main_item_only: false
               };
 
@@ -1504,7 +1478,7 @@ async function run() {
             passed++;
           }
         } else {
-          // Fail path (❗ No product status change on failure)
+          // ❗ Fail path: force product to DRAFT when any check fails
           const lines = buildFailureLines({
             hasIndianTax,
             percentStr,
@@ -1540,11 +1514,24 @@ async function run() {
             }
           }
 
+          // SET TO DRAFT on failure
+          if (!IS_DRY_RUN) {
+            try {
+              await setProductStatusDraft(p.id);
+            } catch (e) {
+              console.warn('Failed to set product to DRAFT on failure:', e?.response?.data || e.message || e);
+            }
+          }
+
           const tableBlock = variantIssueRows2.length ? ('\n\n' + buildVariantIssueTable(variantIssueRows2, parseStringFromMetafield(p.metafieldOrigin))) : '';
           const headerFail = lines.length ? `failed checks:\n${formatNumbered(lines)}` : `failed checks:`;
 
-          // Note: intentionally no status changes here.
-          failureParts.push(`\n${headerFail}${tableBlock}`);
+          // Add an explicit note that we forced DRAFT
+          const draftNote = IS_DRY_RUN
+            ? '\n- Would set product status to DRAFT because checks failed. (DRY RUN)'
+            : '\n- Product status set to DRAFT because checks failed.';
+
+          failureParts.push(`\n${headerFail}${tableBlock}${draftNote}`);
           failed++;
         }
       }
