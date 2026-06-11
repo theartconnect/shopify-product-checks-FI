@@ -10,7 +10,7 @@ const SUCCESS_SLACK_CHANNEL_ID = env.SUCCESS_SLACK_CHANNEL_ID || null;
 const DRY_RUN = env.DRY_RUN || 'true';
 const IS_DRY_RUN = String(DRY_RUN).toLowerCase() === 'true';
 const LOG_EVERY_CALL = String(env.SHOPIFY_LOG_GRAPHQL_COSTS || 'false').toLowerCase() === 'true';
-const MAKE_WEBHOOK_URL = 'https://hook.eu2.make.com/tescg3fg0hnlnyst64e6wpiafuhr52fo';
+const MAKE_WEBHOOK_URL = 'https://hook.eu2.make.com/2k18vw3xirm1uax94bbh3pf9f9ipo3vw';
 const UNIT_PRICE_WEBHOOK_URL = 'https://hook.eu2.make.com/teqrpwmekmddfium11jm3ks5ahw41jkw';
 const SKU_MAKE_URL = 'https://hook.eu2.make.com/1f5zs1xu49pgay2ytei5k2v2tbfw774k';
 const COSMETIC_COLLECTION_HANDLE = 'cosmetic-supplies-missing-metafield';
